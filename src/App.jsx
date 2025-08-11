@@ -176,6 +176,7 @@ export default function App() {
   };
 
   const nextWord = () => {
+    setHeard(""); // Clear previous speech result
     setProgress(p => ({ ...p, xp: p.xp + 5, wordsDone: Math.min((p.wordsDone||0) + 1, current.vocab.length) }));
     if (index < current.vocab.length - 1) setIndex(index + 1);
     else setView("done");
@@ -212,7 +213,12 @@ export default function App() {
                 <button
                   key={l.id}
                   className={`btn justify-start ${i===lessonIdx ? "btn-primary" : "btn-outline"}`}
-                  onClick={() => { setLessonIdx(i); setIndex(0); setView("lesson"); }}
+                  onClick={() => {
+                    setLessonIdx(i);
+                    setIndex(0);
+                    setHeard(""); // Clear previous speech result
+                    setView("lesson");
+                  }}
                 >
                   {i+1}. {l.title}
                 </button>
