@@ -196,8 +196,8 @@ export default function App() {
               <option key={v.name} value={v.name}>{v.name}</option>
             ))}
           </select>
-          <button className="btn btn-ghost" onClick={() => setView("home")}>Home</button>
-          <button className="btn btn-ghost" onClick={() => { setIndex(0); setView("lesson"); }}>Lesson</button>
+          <button className="btn btn-ghost" onClick={() => { setHeard(""); setView("home"); }}>Home</button>
+          <button className="btn btn-ghost" onClick={() => { setIndex(0); setHeard(""); setView("lesson"); }}>Lesson</button>
           <button className="btn btn-ghost" onClick={() => setView("progress")}>Progress</button>
         </div>
       </div>
