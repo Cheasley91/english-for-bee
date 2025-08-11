@@ -84,8 +84,6 @@ const LESSONS = [
     ],
   },
 ];
-  const [lessonIdx, setLessonIdx] = useState(0);
-  const current = LESSONS[lessonIdx];
 
 function loadProgress() {
   try {
@@ -99,8 +97,14 @@ function saveProgress(data) {
 }
 
 const hasTTS = typeof window !== "undefined" && "speechSynthesis" in window;
+const hasSTT =
+  typeof window !== "undefined" &&
+  (window.SpeechRecognition || window.webkitSpeechRecognition);
 
 export default function App() {
+  const [lessonIdx, setLessonIdx] = useState(0);
+  const current = LESSONS[lessonIdx];
+
   const [progress, setProgress] = useState(loadProgress);
   const [view, setView] = useState("home");
   const [index, setIndex] = useState(0);
@@ -108,6 +112,35 @@ export default function App() {
   const [voiceName, setVoiceName] = useState("");
   const [rate, setRate] = useState(1);
   const [pitch, setPitch] = useState(1);
+
+  // Speech-recognition state
+  const [heard, setHeard] = useState("");
+  const [listening, setListening] = useState(false);
+
+  const normalize = (s) => (s || "").toLowerCase().trim().replace(/[^a-z ]/g, "");
+  const targetWord = current.vocab[index].en;
+
+  const startListening = () => {
+    if (!hasSTT) return;
+    const Rec = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const rec = new Rec();
+    rec.lang = "en-US";
+    rec.interimResults = false;
+    rec.maxAlternatives = 1;
+
+    rec.onstart = () => setListening(true);
+    rec.onresult = (e) => {
+      const text = e.results[0][0].transcript || "";
+      setHeard(text);
+    };
+    rec.onerror = () => setListening(false);
+    rec.onend = () => setListening(false);
+
+    setHeard("");
+    rec.start();
+  };
+
+  const matchOk = normalize(heard) === normalize(targetWord);
 
   useEffect(() => {
     if (!hasTTS) return;
@@ -206,6 +239,26 @@ export default function App() {
             </div>
             <div className="flex flex-wrap gap-2 items-center">
               <button className="btn" onClick={() => speak(current.vocab[index].en)}>🔊 Listen</button>
+
+              <button
+                className={`btn ${listening ? "btn-warning" : "btn-accent"}`}
+                onClick={startListening}
+                disabled={!hasSTT}
+                title={hasSTT ? "Speak the word" : "Speech recognition not supported"}
+              >
+                {listening ? "🎤 Listening..." : "🎤 Speak"}
+              </button>
+
+              <span className="text-sm">
+                Heard: <span className="font-semibold">{heard || "—"}</span>
+              </span>
+
+              {heard && (
+                <span className={`badge ${matchOk ? "badge-success" : "badge-error"}`}>
+                  {matchOk ? "✅ Match" : "❌ Try again"}
+                </span>
+              )}
+
               <button className="btn btn-secondary" onClick={nextWord}>Next</button>
             </div>
           </div>
