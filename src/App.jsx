@@ -28,8 +28,26 @@ export default function App() {
     r.onstop = async () => {
       const blob = new Blob(chunksRef.current, { type: "audio/webm" });
       const resp = await fetch("/api/transcribe", { method: "POST", body: blob });
-      const data = await resp.json();
-      setHeard(data.text || "");
+
+let data;
+try {
+  data = await resp.json();
+} catch (e) {
+  // fallback if server returned plain text
+  const raw = await resp.text();
+  data = { error: "non-json", raw };
+}
+
+console.log("TRANSCRIBE =>", resp.status, data);
+
+if (!resp.ok) {
+  alert("Transcribe error: " + (data?.error || resp.status));
+  setHeard("");
+  return;
+}
+
+setHeard(data?.text || "");
+
     };
 
     r.start();
