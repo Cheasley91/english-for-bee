@@ -1,10 +1,28 @@
 import React, { useEffect, useRef, useState } from "react";
 
-// ---------- CONFIG ----------
+/** ---------- CONFIG ---------- **/
 const PROMPTS = ["vegetable", "very", "west", "apple", "an egg", "the market"];
+const THAI = {
+  "vegetable": "ผัก",
+  "very": "มาก",
+  "west": "ตะวันตก",
+  "apple": "แอปเปิล",
+  "an egg": "ไข่หนึ่งฟอง",
+  "the market": "ตลาด",
+};
 const STORAGE_KEY = "efb_progress_v1";
 
-// progress shape: { xp, lessonsCompleted, streak, lastDate }
+// Silence/VAD settings (tunable later)
+const VAD = {
+  minMs: 1500,        // must record at least this long
+  silenceMs: 800,     // stop after this much continuous silence
+  maxMs: 10000,       // hard cap to avoid runaway/cost
+  calibMs: 1000,      // initial calibration window
+  factor: 4.0,        // speech if RMS > baseline * factor
+  hpHz: 120,          // high-pass cutoff
+};
+
+/** ---------- PERSISTENCE ---------- **/
 function loadProgress() {
   try {
     return JSON.parse(localStorage.getItem(STORAGE_KEY)) || {
@@ -17,16 +35,12 @@ function loadProgress() {
     return { xp: 0, lessonsCompleted: 0, streak: 0, lastDate: null };
   }
 }
-function saveProgress(p) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(p));
-}
-function todayISO() {
-  return new Date().toISOString().slice(0, 10);
-}
+function saveProgress(p) { localStorage.setItem(STORAGE_KEY, JSON.stringify(p)); }
+function todayISO() { return new Date().toISOString().slice(0, 10); }
 
-// ---------- MAIN APP ----------
+/** ---------- MAIN APP ---------- **/
 export default function App() {
-  // routing between Home and Practice
+  // routing
   const [view, setView] = useState("home");
 
   // progress
@@ -35,123 +49,254 @@ export default function App() {
   // practice state
   const [idx, setIdx] = useState(0);
   const [heard, setHeard] = useState("");
+  const [showThai, setShowThai] = useState(false);
+
+  // recording state
   const [listening, setListening] = useState(false);
-  const [recorder, setRecorder] = useState(null);
+  const [seconds, setSeconds] = useState(0);       // elapsed seconds
+  const [hint, setHint] = useState("");            // small VAD hint text
+
+  const recorderRef = useRef(null);
   const mediaStreamRef = useRef(null);
   const chunksRef = useRef([]);
 
+  // Web Audio nodes for VAD
+  const audioCtxRef = useRef(null);
+  const sourceRef = useRef(null);
+  const analyserRef = useRef(null);
+  const hpFilterRef = useRef(null);
+  const rafRef = useRef(null);
+
+  // timers
+  const startedAtRef = useRef(0);
+  const lastVoiceMsRef = useRef(0);
+  const tickTimerRef = useRef(null);
+  const maxTimerRef = useRef(null);
+
   const target = PROMPTS[idx];
   const allDone = idx >= PROMPTS.length - 1;
+  const matchOk = norm(heard) === norm(target);
 
-  // cleanup mic on unmount
-  useEffect(() => () => {
-    if (mediaStreamRef.current) mediaStreamRef.current.getTracks().forEach((t) => t.stop());
-  }, []);
+  // cleanup on unmount
+  useEffect(() => () => stopAll(true), []);
 
   // persist progress
   useEffect(() => saveProgress(progress), [progress]);
 
-  // ---------- MIC FLOW ----------
+  /** ---------- RECORDING / TRANSCRIBE ---------- **/
   async function startRec() {
     try {
       setHeard("");
+      setHint("Calibrating…");
+      setSeconds(0);
+
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       mediaStreamRef.current = stream;
 
-      const r = new MediaRecorder(stream, { mimeType: "audio/webm" });
+      // Build MediaRecorder
+      const rec = new MediaRecorder(stream, { mimeType: "audio/webm" });
       chunksRef.current = [];
-      r.ondataavailable = (e) => e.data && chunksRef.current.push(e.data);
-      r.onstop = async () => {
-        try {
-          const blob = new Blob(chunksRef.current, { type: "audio/webm" });
-          const resp = await fetch("/api/transcribe", { method: "POST", body: blob });
+      rec.ondataavailable = (e) => e.data && chunksRef.current.push(e.data);
+      rec.onstop = handleStopAndTranscribe;
+      rec.start();
+      recorderRef.current = rec;
 
-          let data;
-          try {
-            data = await resp.json(); // { text: "..." }
-          } catch {
-            data = { error: "non-json", raw: await resp.text() };
-          }
+      // WebAudio pipeline for VAD
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      audioCtxRef.current = ctx;
 
-          if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
-          setHeard(data.text || "");
-          console.log("TRANSCRIBE =>", resp.status, data);
-        } catch (err) {
-          console.error("Transcribe error:", err);
-          alert("Transcription failed. Please try again.");
-          setHeard("");
-        }
-      };
+      const source = ctx.createMediaStreamSource(stream);
+      sourceRef.current = source;
 
-      r.start();
-      setRecorder(r);
+      const hp = ctx.createBiquadFilter();
+      hp.type = "highpass";
+      hp.frequency.value = VAD.hpHz;
+      hpFilterRef.current = hp;
+
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 2048;
+      analyserRef.current = analyser;
+
+      source.connect(hp).connect(analyser);
+
       setListening(true);
+      startedAtRef.current = performance.now();
+      lastVoiceMsRef.current = startedAtRef.current; // will adjust during calib
+
+      // elapsed seconds tick
+      tickTimerRef.current = setInterval(() => {
+        const elapsed = Math.floor((performance.now() - startedAtRef.current) / 1000);
+        setSeconds(elapsed);
+      }, 250);
+
+      // hard cap timer
+      maxTimerRef.current = setTimeout(() => {
+        setHint("Max time reached.");
+        stopRec(); // triggers onstop → transcribe
+      }, VAD.maxMs);
+
+      // run VAD loop
+      startVADLoop();
     } catch (err) {
       console.error("Mic start error:", err.name, err.message);
-      if (err.name === "NotAllowedError") {
-        alert("Microphone is blocked. Click the lock icon by the URL, set Microphone to Allow, then reload the page.");
-      } else if (err.name === "NotFoundError") {
-        alert("No microphone found. Select a different input in your browser settings.");
-      } else if (err.name === "NotReadableError") {
-        alert("Your mic seems busy. Close other apps (Zoom/Teams), then reload and try again.");
-      } else {
-        alert("Could not access microphone. Please check permissions and try again.");
-      }
+      alert("Please allow microphone access and try again.");
+      stopAll(true);
     }
   }
 
   function stopRec() {
-    if (!recorder) return;
-    recorder.stop();
+    // manual stop (also called by auto VAD)
+    if (recorderRef.current && recorderRef.current.state !== "inactive") {
+      recorderRef.current.stop();
+    }
     setListening(false);
-    if (mediaStreamRef.current) mediaStreamRef.current.getTracks().forEach((t) => t.stop());
+    stopAudioNodes();
+    stopTimers();
+    // stop mic tracks after recorder stops to avoid truncation
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach((t) => t.stop());
+    }
   }
 
-  // ---------- MATCH / NAV ----------
-  const matchOk = norm(heard) === norm(target);
+  function stopAll(silent = false) {
+    try { stopRec(); } catch {}
+    if (!silent) setHint("");
+  }
 
+  async function handleStopAndTranscribe() {
+    try {
+      const blob = new Blob(chunksRef.current, { type: "audio/webm" });
+      const resp = await fetch("/api/transcribe", { method: "POST", body: blob });
+      let data;
+      try { data = await resp.json(); }
+      catch { data = { error: "non-json", raw: await resp.text() }; }
+
+      if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
+      setHeard(data.text || "");
+      console.log("TRANSCRIBE =>", resp.status, data);
+    } catch (err) {
+      console.error("Transcribe error:", err);
+      alert("Transcription failed. Please try again.");
+      setHeard("");
+    } finally {
+      setHint("");
+    }
+  }
+
+  /** ---------- SIMPLE VAD (RMS + calibration) ---------- **/
+  function startVADLoop() {
+    const analyser = analyserRef.current;
+    if (!analyser) return;
+
+    const buf = new Float32Array(analyser.fftSize);
+    let baseline = 0;
+    let haveBaseline = false;
+
+    const startTs = performance.now();
+
+    const loop = () => {
+      analyser.getFloatTimeDomainData(buf);
+      const rms = rootMeanSquare(buf);
+
+      // calibration window
+      const now = performance.now();
+      if (!haveBaseline) {
+        const dt = now - startTs;
+        // incremental average for baseline
+        baseline = baseline === 0 ? rms : baseline * 0.9 + rms * 0.1;
+        setHint("Calibrating…");
+        if (dt >= VAD.calibMs) {
+          haveBaseline = true;
+          setHint("Listening…");
+          // initialize lastVoice when speech starts
+          lastVoiceMsRef.current = now;
+        }
+      } else {
+        const thresh = Math.max(baseline * VAD.factor, baseline + 0.005); // guard for very low rooms
+        const isSpeech = rms > thresh;
+
+        const sinceStart = now - startedAtRef.current;
+        const sinceVoice = now - lastVoiceMsRef.current;
+
+        if (isSpeech) {
+          lastVoiceMsRef.current = now;
+        }
+
+        // show subtle state hint
+        setHint(isSpeech ? "Speaking…" : "…");
+
+        // auto-stop only after minMs and when silence persists
+        if (sinceStart >= VAD.minMs && sinceVoice >= VAD.silenceMs) {
+          setHint("Silence detected.");
+          stopRec();
+          return; // recorder onstop will transcribe
+        }
+      }
+
+      rafRef.current = requestAnimationFrame(loop);
+    };
+
+    rafRef.current = requestAnimationFrame(loop);
+  }
+
+  function stopAudioNodes() {
+    if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
+    try { if (sourceRef.current) sourceRef.current.disconnect(); } catch {}
+    try { if (hpFilterRef.current) hpFilterRef.current.disconnect(); } catch {}
+    try { if (analyserRef.current) analyserRef.current.disconnect(); } catch {}
+    if (audioCtxRef.current) {
+      try { audioCtxRef.current.close(); } catch {}
+      audioCtxRef.current = null;
+    }
+  }
+
+  function stopTimers() {
+    if (tickTimerRef.current) { clearInterval(tickTimerRef.current); tickTimerRef.current = null; }
+    if (maxTimerRef.current) { clearTimeout(maxTimerRef.current); maxTimerRef.current = null; }
+  }
+
+  /** ---------- MATCH / NAV ---------- **/
   function nextPrompt() {
-    // advance only when correct, otherwise encourage retry
-    if (!matchOk) return alert("Try saying it again, then press Stop.");
+    if (!matchOk) return alert("Try saying it again, then try again.");
     if (idx < PROMPTS.length - 1) {
       setHeard("");
+      setShowThai(false);
       setIdx((i) => i + 1);
     }
   }
 
   function resetPractice() {
     setHeard("");
+    setShowThai(false);
     setIdx(0);
   }
 
   function markSessionComplete() {
-    // Count a "lesson" when Bee correctly reaches the last prompt.
     if (!matchOk) return alert("Say the last prompt correctly first, then Finish.");
     const today = todayISO();
     const prev = progress.lastDate;
     let newStreak = progress.streak || 0;
+
     if (prev === today) {
-      // same day: keep streak as is
       newStreak = progress.streak || 1;
     } else {
-      // new day
       const diffDays = dayDiff(prev, today);
       newStreak = prev ? (diffDays === 1 ? (progress.streak || 0) + 1 : 1) : 1;
     }
 
     const updated = {
       ...progress,
-      xp: (progress.xp || 0) + 50, // award XP for finishing session
+      xp: (progress.xp || 0) + 50,
       lessonsCompleted: (progress.lessonsCompleted || 0) + 1,
       streak: newStreak,
       lastDate: today,
     };
     setProgress(updated);
-    // back to home
     resetPractice();
     setView("home");
   }
 
+  /** ---------- RENDER ---------- **/
   return (
     <div className="min-h-screen bg-base-200 p-0 sm:p-6">
       {/* Navbar */}
@@ -163,10 +308,7 @@ export default function App() {
           </button>
           <button
             className={`btn btn-ghost ${view === "practice" ? "btn-active" : ""}`}
-            onClick={() => {
-              resetPractice();
-              setView("practice");
-            }}
+            onClick={() => { resetPractice(); setView("practice"); }}
           >
             Practice
           </button>
@@ -180,12 +322,8 @@ export default function App() {
           <div className="hero bg-base-100 rounded-none sm:rounded-box shadow mb-4">
             <div className="hero-content w-full flex-col items-start">
               <h1 className="text-3xl font-extrabold">Hi Bee 👋</h1>
-              <p className="text-base-content/70">
-                Practice a little each day. Small steps, big progress.
-              </p>
-              <button className="btn btn-primary" onClick={() => setView("practice")}>
-                Continue practice
-              </button>
+              <p className="text-base-content/70">Practice a little each day. Small steps, big progress.</p>
+              <button className="btn btn-primary" onClick={() => setView("practice")}>Continue practice</button>
             </div>
           </div>
 
@@ -219,11 +357,31 @@ export default function App() {
 
       {view === "practice" && (
         <div className="card bg-base-100 w-full max-w-none rounded-none sm:rounded-box shadow p-5 sm:p-6">
-          <h2 className="text-3xl font-extrabold mb-2">{target}</h2>
-          <p className="text-sm text-gray-500 mb-2">
-            {idx + 1} / {PROMPTS.length}
+          <h2 className="text-3xl font-extrabold mb-1">{target}</h2>
+
+          <div className="flex items-center gap-2 mb-2">
+            <p className="text-sm text-gray-500">
+              {idx + 1} / {PROMPTS.length}
+            </p>
+            <button className="btn btn-xs" onClick={() => setShowThai(v => !v)}>
+              {showThai ? "Hide Thai" : "Show Thai"}
+            </button>
+            {listening && (
+              <span className="badge badge-outline">
+                {hint || "Listening…"} · {seconds}s
+              </span>
+            )}
+          </div>
+
+          {showThai && (
+            <p className="text-sm text-primary mb-2">
+              Thai: <span className="font-semibold">{THAI[target] || "—"}</span>
+            </p>
+          )}
+
+          <p className="text-sm text-gray-500 mb-4">
+            Tap Listen, then Start and speak—recording will auto-stop.
           </p>
-          <p className="text-sm text-gray-500 mb-4">Tap Listen, then Start, speak, and Stop.</p>
 
           <div className="flex gap-2 flex-wrap items-center">
             <button className="btn" onClick={() => speak(target)}>🔊 Listen</button>
@@ -236,6 +394,7 @@ export default function App() {
               className="btn btn-secondary"
               onClick={() => {
                 setHeard("");
+                setShowThai(false);
                 setIdx((i) => (i + 1) % PROMPTS.length);
               }}
             >
@@ -270,7 +429,7 @@ export default function App() {
   );
 }
 
-// ---------- helpers ----------
+/** ---------- helpers ---------- **/
 function norm(s) {
   return (s || "").toLowerCase().trim().replace(/[^a-z ]/g, "");
 }
@@ -286,4 +445,9 @@ function dayDiff(iso1, iso2) {
   const d1 = new Date(iso1 + "T00:00:00Z");
   const d2 = new Date(iso2 + "T00:00:00Z");
   return Math.round((d2 - d1) / 86400000);
+}
+function rootMeanSquare(buf) {
+  let sum = 0;
+  for (let i = 0; i < buf.length; i++) { const v = buf[i]; sum += v * v; }
+  return Math.sqrt(sum / buf.length);
 }
