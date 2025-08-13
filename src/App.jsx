@@ -1,8 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
 
-/** ---------- CONFIG ---------- **/
-const PROMPTS = ["boat","vegetable", "very", "west", "apple", "an egg", "the market"];
-const THAI = {
+/** ---------- CONFIG (initial defaults only) ---------- **/
+const PROMPTS_DEFAULT = ["boat", "vegetable", "very", "west", "apple", "an egg", "the market"];
+const THAI_DEFAULT = {
   "vegetable": "ผัก",
   "very": "มาก",
   "west": "ตะวันตก",
@@ -16,14 +16,14 @@ const STORAGE_KEY = "efb_progress_v1";
 const VALID_VOICES = ["alloy", "ash", "ballad", "coral", "echo", "fable", "onyx", "nova", "sage", "shimmer", "verse"];
 const DEFAULT_VOICE = "alloy";
 
-// Silence/VAD settings (tunable later)
+// Silence/VAD settings
 const VAD = {
-  minMs: 1500,   // must capture at least this long
-  silenceMs: 1200,// stop after this much continuous silence
-  maxMs: 10000,  // hard cap to avoid runaway/cost
-  calibMs: 1000, // initial noise calibration
-  factor: 4.0,   // speech if RMS > baseline * factor
-  hpHz: 120,     // high-pass cutoff
+  minMs: 1500,    // must capture at least this long
+  silenceMs: 1200,// <- your preference
+  maxMs: 10000,   // hard cap to avoid runaway/cost
+  calibMs: 1000,  // initial noise calibration
+  factor: 4.0,    // speech if RMS > baseline * factor
+  hpHz: 120,      // high-pass cutoff
 };
 
 /** ---------- PERSISTENCE ---------- **/
@@ -49,6 +49,11 @@ export default function App() {
 
   // progress
   const [progress, setProgress] = useState(loadProgress);
+
+  // dynamic lesson state (replaces hard-coded lists at runtime)
+  const [prompts, setPrompts] = useState(PROMPTS_DEFAULT); // array of English strings
+  const [thaiMap, setThaiMap] = useState(THAI_DEFAULT);    // { en: th }
+  const [lessonLoading, setLessonLoading] = useState(false);
 
   // practice state
   const [idx, setIdx] = useState(0);
@@ -81,8 +86,9 @@ export default function App() {
   const tickTimerRef = useRef(null);
   const maxTimerRef = useRef(null);
 
-  const target = PROMPTS[idx];
-  const allDone = idx >= PROMPTS.length - 1;
+  // derived
+  const target = prompts[idx];
+  const allDone = idx >= prompts.length - 1;
   const matchOk = norm(heard) === norm(target);
 
   // cleanup on unmount
@@ -98,7 +104,6 @@ export default function App() {
     if (!resp.ok) throw new Error(`TTS HTTP ${resp.status}`);
     return await resp.blob(); // audio/mpeg
   }
-
   async function speak(text) {
     try {
       setTtsBusy(true);
@@ -109,8 +114,7 @@ export default function App() {
       } catch (e) {
         console.warn("TTS failed for voice", voice, e);
         if (voice !== DEFAULT_VOICE) {
-          // fallback to alloy once
-          blob = await fetchTTS(text, DEFAULT_VOICE);
+          blob = await fetchTTS(text, DEFAULT_VOICE); // fallback once
         } else {
           throw e;
         }
@@ -124,6 +128,66 @@ export default function App() {
       alert("Couldn’t play audio. Please try again.");
     } finally {
       setTtsBusy(false);
+    }
+  }
+
+  /** ---------- Fetch a NEW LESSON from /api/new-lesson ---------- **/
+  async function fetchNewLesson({ level = "A1", theme = "market", count = 6, review_from = [] } = {}) {
+    setLessonLoading(true);
+    try {
+      const resp = await fetch("/api/new-lesson", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ level, theme, count, review_from })
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = await resp.json();
+
+      const items = data?.lesson?.new_vocab || [];
+      if (!Array.isArray(items) || items.length === 0) throw new Error("No items returned");
+
+      // build new lists
+      const nextPrompts = items.map(it => (it.en || "").trim()).filter(Boolean);
+      const nextThai = {};
+      for (const it of items) if (it.en && it.th) nextThai[it.en] = it.th;
+
+      // apply to state
+      setPrompts(nextPrompts);
+      setThaiMap(nextThai);
+
+      // reset practice for new lesson
+      setIdx(0);
+      setHeard("");
+      setShowThai(false);
+
+      // cache for fallback
+      localStorage.setItem("efb_last_lesson_json", JSON.stringify(data.lesson || null));
+      return true;
+    } catch (e) {
+      console.error("new-lesson error:", e);
+      alert("Couldn’t load a new lesson. Using your last one.");
+      // fallback: try cached lesson
+      const cached = localStorage.getItem("efb_last_lesson_json");
+      if (cached) {
+        try {
+          const lesson = JSON.parse(cached);
+          const items = Array.isArray(lesson?.new_vocab) ? lesson.new_vocab : [];
+          if (items.length) {
+            const nextPrompts = items.map(it => (it.en || "").trim()).filter(Boolean);
+            const nextThai = {};
+            for (const it of items) if (it.en && it.th) nextThai[it.en] = it.th;
+            setPrompts(nextPrompts);
+            setThaiMap(nextThai);
+            setIdx(0);
+            setHeard("");
+            setShowThai(false);
+            return true;
+          }
+        } catch {}
+      }
+      return false;
+    } finally {
+      setLessonLoading(false);
     }
   }
 
@@ -299,7 +363,7 @@ export default function App() {
   /** ---------- MATCH / NAV ---------- **/
   function nextPrompt() {
     if (!matchOk) return alert("Try saying it again, then try again.");
-    if (idx < PROMPTS.length - 1) {
+    if (idx < prompts.length - 1) {
       setHeard("");
       setShowThai(false);
       setIdx((i) => i + 1);
@@ -312,7 +376,7 @@ export default function App() {
     setIdx(0);
   }
 
-  function markSessionComplete() {
+  async function markSessionComplete() {
     if (!matchOk) return alert("Say the last prompt correctly first, then Finish.");
     const today = todayISO();
     const prev = progress.lastDate;
@@ -333,6 +397,16 @@ export default function App() {
       lastDate: today,
     };
     setProgress(updated);
+
+    // === Fetch NEW LESSON here (uses current prompts as review/avoid list) ===
+    const review_from = Array.isArray(prompts) ? prompts.slice(0, 8) : [];
+    await fetchNewLesson({
+      level: "A1",
+      theme: "market",
+      count: 6,
+      review_from
+    });
+
     resetPractice();
     setView("home");
   }
@@ -377,10 +451,19 @@ export default function App() {
         <div className="w-full">
           {/* Hero */}
           <div className="hero bg-base-100 rounded-none sm:rounded-box shadow mb-4">
-            <div className="hero-content w-full flex-col items-start">
+            <div className="hero-content w-full flex-col items-start gap-2">
               <h1 className="text-3xl font-extrabold">Hi Bee 👋</h1>
               <p className="text-base-content/70">Practice a little each day. Small steps, big progress.</p>
-              <button className="btn btn-primary" onClick={() => setView("practice")}>Continue practice</button>
+              <div className="flex gap-2">
+                <button className="btn btn-primary" onClick={() => setView("practice")}>Continue practice</button>
+                <button
+                  className={`btn ${lessonLoading ? "btn-disabled" : "btn-secondary"}`}
+                  onClick={() => fetchNewLesson({ level: "A1", theme: "cooking", count: 6, review_from: prompts })}
+                  disabled={lessonLoading}
+                >
+                  {lessonLoading ? "Loading…" : "New lesson"}
+                </button>
+              </div>
             </div>
           </div>
 
@@ -418,7 +501,7 @@ export default function App() {
 
           <div className="flex items-center gap-2 mb-2">
             <p className="text-sm text-gray-500">
-              {idx + 1} / {PROMPTS.length}
+              {idx + 1} / {prompts.length}
             </p>
             <button className="btn btn-xs" onClick={() => setShowThai(v => !v)}>
               {showThai ? "Hide Thai" : "Show Thai"}
@@ -432,7 +515,7 @@ export default function App() {
 
           {showThai && (
             <p className="text-sm text-primary mb-2">
-              Thai: <span className="font-semibold">{THAI[target] || "—"}</span>
+              Thai: <span className="font-semibold">{thaiMap[target] || "—"}</span>
             </p>
           )}
 
@@ -454,7 +537,7 @@ export default function App() {
               onClick={() => {
                 setHeard("");
                 setShowThai(false);
-                setIdx((i) => (i + 1) % PROMPTS.length);
+                setIdx((i) => (i + 1) % prompts.length);
               }}
             >
               Skip
