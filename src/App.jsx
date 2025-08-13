@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 
 /** ---------- CONFIG ---------- **/
-const PROMPTS = ["vegetable", "very", "west", "apple", "an egg", "the market"];
+const PROMPTS = ["boat","vegetable", "very", "west", "apple", "an egg", "the market"];
 const THAI = {
   "vegetable": "ผัก",
   "very": "มาก",
