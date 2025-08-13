@@ -14,12 +14,12 @@ const STORAGE_KEY = "efb_progress_v1";
 
 // Silence/VAD settings (tunable later)
 const VAD = {
-  minMs: 1500,        // must record at least this long
-  silenceMs: 800,     // stop after this much continuous silence
-  maxMs: 10000,       // hard cap to avoid runaway/cost
-  calibMs: 1000,      // initial calibration window
-  factor: 4.0,        // speech if RMS > baseline * factor
-  hpHz: 120,          // high-pass cutoff
+  minMs: 1500,   // must capture at least this long
+  silenceMs: 800,// stop after this much continuous silence
+  maxMs: 10000,  // hard cap to avoid runaway/cost
+  calibMs: 1000, // initial noise calibration
+  factor: 4.0,   // speech if RMS > baseline * factor
+  hpHz: 120,     // high-pass cutoff
 };
 
 /** ---------- PERSISTENCE ---------- **/
@@ -50,6 +50,11 @@ export default function App() {
   const [idx, setIdx] = useState(0);
   const [heard, setHeard] = useState("");
   const [showThai, setShowThai] = useState(false);
+
+  // TTS state
+  const [voice, setVoice] = useState("alloy");
+  const VOICES = ["alloy", "verse", "aria", "sage"];
+  const [ttsBusy, setTtsBusy] = useState(false);
 
   // recording state
   const [listening, setListening] = useState(false);
@@ -82,6 +87,27 @@ export default function App() {
 
   // persist progress
   useEffect(() => saveProgress(progress), [progress]);
+
+  /** ---------- TTS (OpenAI via /api/tts) ---------- **/
+  async function speak(text) {
+    try {
+      setTtsBusy(true);
+      const url = `/api/tts?text=${encodeURIComponent(text)}&voice=${encodeURIComponent(voice)}`;
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error(`TTS HTTP ${resp.status}`);
+
+      const blob = await resp.blob();           // audio/mpeg
+      const audioUrl = URL.createObjectURL(blob);
+      const audio = new Audio(audioUrl);
+      audio.onended = () => URL.revokeObjectURL(audioUrl);
+      await audio.play();
+    } catch (e) {
+      console.error("TTS error:", e);
+      alert("Couldn’t play audio. Please try again.");
+    } finally {
+      setTtsBusy(false);
+    }
+  }
 
   /** ---------- RECORDING / TRANSCRIBE ---------- **/
   async function startRec() {
@@ -208,19 +234,16 @@ export default function App() {
         if (dt >= VAD.calibMs) {
           haveBaseline = true;
           setHint("Listening…");
-          // initialize lastVoice when speech starts
           lastVoiceMsRef.current = now;
         }
       } else {
-        const thresh = Math.max(baseline * VAD.factor, baseline + 0.005); // guard for very low rooms
+        const thresh = Math.max(baseline * VAD.factor, baseline + 0.005); // guard very silent rooms
         const isSpeech = rms > thresh;
 
         const sinceStart = now - startedAtRef.current;
         const sinceVoice = now - lastVoiceMsRef.current;
 
-        if (isSpeech) {
-          lastVoiceMsRef.current = now;
-        }
+        if (isSpeech) lastVoiceMsRef.current = now;
 
         // show subtle state hint
         setHint(isSpeech ? "Speaking…" : "…");
@@ -228,8 +251,8 @@ export default function App() {
         // auto-stop only after minMs and when silence persists
         if (sinceStart >= VAD.minMs && sinceVoice >= VAD.silenceMs) {
           setHint("Silence detected.");
-          stopRec();
-          return; // recorder onstop will transcribe
+          stopRec(); // recorder onstop → transcribe
+          return;
         }
       }
 
@@ -303,6 +326,15 @@ export default function App() {
       <div className="navbar bg-base-100 rounded-none sm:rounded-box shadow mb-6">
         <div className="flex-1 px-2 text-xl font-bold">🐝 English for Bee</div>
         <div className="flex-none">
+          <select
+            className="select select-sm select-bordered mr-2"
+            value={voice}
+            onChange={(e) => setVoice(e.target.value)}
+            title="Voice"
+          >
+            {VOICES.map(v => <option key={v} value={v}>{v}</option>)}
+          </select>
+
           <button className={`btn btn-ghost ${view === "home" ? "btn-active" : ""}`} onClick={() => setView("home")}>
             Home
           </button>
@@ -384,7 +416,9 @@ export default function App() {
           </p>
 
           <div className="flex gap-2 flex-wrap items-center">
-            <button className="btn" onClick={() => speak(target)}>🔊 Listen</button>
+            <button className="btn" onClick={() => speak(target)} disabled={ttsBusy}>
+              {ttsBusy ? "Loading…" : "🔊 Listen"}
+            </button>
             {!listening ? (
               <button className="btn btn-accent" onClick={startRec}>🎤 Start</button>
             ) : (
@@ -400,7 +434,6 @@ export default function App() {
             >
               Skip
             </button>
-            <button className="btn" onClick={() => setHeard("")}>Repeat</button>
           </div>
 
           <div className="mt-4">
@@ -432,13 +465,6 @@ export default function App() {
 /** ---------- helpers ---------- **/
 function norm(s) {
   return (s || "").toLowerCase().trim().replace(/[^a-z ]/g, "");
-}
-function speak(text) {
-  if (!("speechSynthesis" in window)) return;
-  const u = new SpeechSynthesisUtterance(text);
-  u.lang = "en-US";
-  window.speechSynthesis.cancel();
-  window.speechSynthesis.speak(u);
 }
 function dayDiff(iso1, iso2) {
   if (!iso1 || !iso2) return Infinity;
