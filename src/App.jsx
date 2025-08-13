@@ -12,10 +12,14 @@ const THAI = {
 };
 const STORAGE_KEY = "efb_progress_v1";
 
+// Valid OpenAI TTS voices for `tts-1`
+const VALID_VOICES = ["alloy", "ash", "ballad", "coral", "echo", "fable", "onyx", "nova", "sage", "shimmer", "verse"];
+const DEFAULT_VOICE = "alloy";
+
 // Silence/VAD settings (tunable later)
 const VAD = {
   minMs: 1500,   // must capture at least this long
-  silenceMs: 800,// stop after this much continuous silence
+  silenceMs: 1200,// stop after this much continuous silence
   maxMs: 10000,  // hard cap to avoid runaway/cost
   calibMs: 1000, // initial noise calibration
   factor: 4.0,   // speech if RMS > baseline * factor
@@ -52,8 +56,7 @@ export default function App() {
   const [showThai, setShowThai] = useState(false);
 
   // TTS state
-  const [voice, setVoice] = useState("alloy");
-  const VOICES = ["alloy", "verse", "aria", "sage"];
+  const [voice, setVoice] = useState(DEFAULT_VOICE);
   const [ttsBusy, setTtsBusy] = useState(false);
 
   // recording state
@@ -88,15 +91,30 @@ export default function App() {
   // persist progress
   useEffect(() => saveProgress(progress), [progress]);
 
-  /** ---------- TTS (OpenAI via /api/tts) ---------- **/
+  /** ---------- TTS (OpenAI via /api/tts) with fallback ---------- **/
+  async function fetchTTS(text, v) {
+    const url = `/api/tts?text=${encodeURIComponent(text)}&voice=${encodeURIComponent(v)}`;
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error(`TTS HTTP ${resp.status}`);
+    return await resp.blob(); // audio/mpeg
+  }
+
   async function speak(text) {
     try {
       setTtsBusy(true);
-      const url = `/api/tts?text=${encodeURIComponent(text)}&voice=${encodeURIComponent(voice)}`;
-      const resp = await fetch(url);
-      if (!resp.ok) throw new Error(`TTS HTTP ${resp.status}`);
-
-      const blob = await resp.blob();           // audio/mpeg
+      // try selected voice first
+      let blob;
+      try {
+        blob = await fetchTTS(text, voice);
+      } catch (e) {
+        console.warn("TTS failed for voice", voice, e);
+        if (voice !== DEFAULT_VOICE) {
+          // fallback to alloy once
+          blob = await fetchTTS(text, DEFAULT_VOICE);
+        } else {
+          throw e;
+        }
+      }
       const audioUrl = URL.createObjectURL(blob);
       const audio = new Audio(audioUrl);
       audio.onended = () => URL.revokeObjectURL(audioUrl);
@@ -325,15 +343,22 @@ export default function App() {
       {/* Navbar */}
       <div className="navbar bg-base-100 rounded-none sm:rounded-box shadow mb-6">
         <div className="flex-1 px-2 text-xl font-bold">🐝 English for Bee</div>
-        <div className="flex-none">
-          <select
-            className="select select-sm select-bordered mr-2"
-            value={voice}
-            onChange={(e) => setVoice(e.target.value)}
-            title="Voice"
-          >
-            {VOICES.map(v => <option key={v} value={v}>{v}</option>)}
-          </select>
+        <div className="flex-none flex items-center gap-2">
+          <label className="label cursor-pointer gap-2">
+            <span className="label-text">Voice</span>
+            <select
+              className="select select-sm select-bordered"
+              value={voice}
+              onChange={(e) => setVoice(e.target.value)}
+              title="Voice"
+            >
+              {VALID_VOICES.map(v => (
+                <option key={v} value={v}>
+                  {v.charAt(0).toUpperCase() + v.slice(1)}
+                </option>
+              ))}
+            </select>
+          </label>
 
           <button className={`btn btn-ghost ${view === "home" ? "btn-active" : ""}`} onClick={() => setView("home")}>
             Home
