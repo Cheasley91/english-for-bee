@@ -18,12 +18,12 @@ const DEFAULT_VOICE = "alloy";
 
 // Silence/VAD settings
 const VAD = {
-  minMs: 1500,    // must capture at least this long
-  silenceMs: 1200,// <- your preference
-  maxMs: 10000,   // hard cap to avoid runaway/cost
-  calibMs: 1000,  // initial noise calibration
-  factor: 4.0,    // speech if RMS > baseline * factor
-  hpHz: 120,      // high-pass cutoff
+  minMs: 1500,     // must capture at least this long
+  silenceMs: 1200, // your preference
+  maxMs: 10000,    // hard cap to avoid runaway/cost
+  calibMs: 1000,   // initial noise calibration
+  factor: 4.0,     // speech if RMS > baseline * factor
+  hpHz: 120,       // high-pass cutoff
 };
 
 /** ---------- PERSISTENCE ---------- **/
@@ -34,13 +34,56 @@ function loadProgress() {
       lessonsCompleted: 0,
       streak: 0,
       lastDate: null,
+      level: "A1",
+      recentScores: [],
+      troubleWords: [],
     };
   } catch {
-    return { xp: 0, lessonsCompleted: 0, streak: 0, lastDate: null };
+    // Same shape as above, used if localStorage is empty or unreadable
+    return {
+      xp: 0,
+      lessonsCompleted: 0,
+      streak: 0,
+      lastDate: null,
+      level: "A1",
+      recentScores: [],
+      troubleWords: [],
+    };
   }
 }
 function saveProgress(p) { localStorage.setItem(STORAGE_KEY, JSON.stringify(p)); }
 function todayISO() { return new Date().toISOString().slice(0, 10); }
+
+/** ---------- HELPERS (pure functions) ---------- **/
+function norm(s) {
+  return (s || "").toLowerCase().trim().replace(/[^a-z ]/g, "");
+}
+function dayDiff(iso1, iso2) {
+  if (!iso1 || !iso2) return Infinity;
+  const d1 = new Date(iso1 + "T00:00:00Z");
+  const d2 = new Date(iso2 + "T00:00:00Z");
+  return Math.round((d2 - d1) / 86400000);
+}
+function rootMeanSquare(buf) {
+  let sum = 0;
+  for (let i = 0; i < buf.length; i++) { const v = buf[i]; sum += v * v; }
+  return Math.sqrt(sum / buf.length);
+}
+function decideNextLevelAndCount(level, recentScores) {
+  const last3 = recentScores.slice(-3);
+  const avg = last3.length ? (last3.reduce((a, b) => a + b, 0) / last3.length) : 0;
+
+  const countByLevel = { A0: 6, A1: 6, A2: 8, B1: 10, B2: 10 };
+  const order = ["A0", "A1", "A2", "B1", "B2"];
+  const pos = Math.max(0, order.indexOf(level));
+
+  let nextLevel = level;
+  if (avg >= 0.85 && pos < order.length - 1) nextLevel = order[pos + 1]; // move up if doing great
+  if (avg > 0 && avg <= 0.5 && pos > 0)       nextLevel = order[pos - 1]; // move down if struggling
+
+  const count = countByLevel[nextLevel] || 6;
+  return { nextLevel, count };
+}
 
 /** ---------- MAIN APP ---------- **/
 export default function App() {
@@ -51,7 +94,7 @@ export default function App() {
   const [progress, setProgress] = useState(loadProgress);
 
   // dynamic lesson state (replaces hard-coded lists at runtime)
-  const [prompts, setPrompts] = useState(PROMPTS_DEFAULT); // array of English strings
+  const [prompts, setPrompts] = useState(PROMPTS_DEFAULT); // English words/phrases
   const [thaiMap, setThaiMap] = useState(THAI_DEFAULT);    // { en: th }
   const [lessonLoading, setLessonLoading] = useState(false);
 
@@ -107,14 +150,13 @@ export default function App() {
   async function speak(text) {
     try {
       setTtsBusy(true);
-      // try selected voice first
       let blob;
       try {
         blob = await fetchTTS(text, voice);
       } catch (e) {
         console.warn("TTS failed for voice", voice, e);
         if (voice !== DEFAULT_VOICE) {
-          blob = await fetchTTS(text, DEFAULT_VOICE); // fallback once
+          blob = await fetchTTS(text, DEFAULT_VOICE);
         } else {
           throw e;
         }
@@ -378,10 +420,11 @@ export default function App() {
 
   async function markSessionComplete() {
     if (!matchOk) return alert("Say the last prompt correctly first, then Finish.");
+
+    // --- streak bookkeeping ---
     const today = todayISO();
     const prev = progress.lastDate;
     let newStreak = progress.streak || 0;
-
     if (prev === today) {
       newStreak = progress.streak || 1;
     } else {
@@ -389,24 +432,50 @@ export default function App() {
       newStreak = prev ? (diffDays === 1 ? (progress.streak || 0) + 1 : 1) : 1;
     }
 
+    // --- simple session score (for now finishing = success) ---
+    const sessionScore = 1.0;
+    const recentScores = Array.isArray(progress.recentScores) ? [...progress.recentScores] : [];
+    recentScores.push(sessionScore);
+    while (recentScores.length > 5) recentScores.shift(); // keep last 5
+
+    // --- decide next level & how many new items ---
+    const order = ["A0", "A1", "A2", "B1", "B2"];
+    const currentLevel = progress.level || "A1";
+    const levelIdx = Math.max(0, order.indexOf(currentLevel));
+
+    const last3 = recentScores.slice(-3);
+    const avg = last3.length ? (last3.reduce((a, b) => a + b, 0) / last3.length) : 0;
+
+    let nextLevel = currentLevel;
+    if (avg >= 0.85 && levelIdx < order.length - 1) nextLevel = order[levelIdx + 1];
+    if (avg > 0 && avg <= 0.5 && levelIdx > 0)       nextLevel = order[levelIdx - 1];
+
+    const countByLevel = { A0: 6, A1: 6, A2: 8, B1: 10, B2: 10 };
+    const nextCount = countByLevel[nextLevel] || 6;
+
+    // --- progress object we save ---
     const updated = {
       ...progress,
       xp: (progress.xp || 0) + 50,
       lessonsCompleted: (progress.lessonsCompleted || 0) + 1,
       streak: newStreak,
       lastDate: today,
+      level: nextLevel,
+      recentScores,
+      troubleWords: progress.troubleWords || [],
     };
     setProgress(updated);
 
-    // === Fetch NEW LESSON here (uses current prompts as review/avoid list) ===
+    // Ask the server for a fresh lesson (avoid repeating the current words)
     const review_from = Array.isArray(prompts) ? prompts.slice(0, 8) : [];
     await fetchNewLesson({
-      level: "A1",
-      theme: "market",
-      count: 6,
+      level: updated.level,
+      theme: "market",  // you can rotate this later
+      count: nextCount,
       review_from
     });
 
+    // reset and go home
     resetPractice();
     setView("home");
   }
@@ -458,7 +527,7 @@ export default function App() {
                 <button className="btn btn-primary" onClick={() => setView("practice")}>Continue practice</button>
                 <button
                   className={`btn ${lessonLoading ? "btn-disabled" : "btn-secondary"}`}
-                  onClick={() => fetchNewLesson({ level: "A1", theme: "cooking", count: 6, review_from: prompts })}
+                  onClick={() => fetchNewLesson({ level: progress.level || "A1", theme: "cooking", count: 6, review_from: prompts })}
                   disabled={lessonLoading}
                 >
                   {lessonLoading ? "Loading…" : "New lesson"}
@@ -568,20 +637,4 @@ export default function App() {
       )}
     </div>
   );
-}
-
-/** ---------- helpers ---------- **/
-function norm(s) {
-  return (s || "").toLowerCase().trim().replace(/[^a-z ]/g, "");
-}
-function dayDiff(iso1, iso2) {
-  if (!iso1 || !iso2) return Infinity;
-  const d1 = new Date(iso1 + "T00:00:00Z");
-  const d2 = new Date(iso2 + "T00:00:00Z");
-  return Math.round((d2 - d1) / 86400000);
-}
-function rootMeanSquare(buf) {
-  let sum = 0;
-  for (let i = 0; i < buf.length; i++) { const v = buf[i]; sum += v * v; }
-  return Math.sqrt(sum / buf.length);
 }
