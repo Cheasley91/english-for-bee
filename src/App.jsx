@@ -26,10 +26,33 @@ const VAD = {
   hpHz: 120,       // high-pass cutoff
 };
 
-/** ---------- PERSISTENCE ---------- **/
+const DEFAULT_PROGRESS = {
+  xp: 0,
+  lessonsCompleted: 0,
+  streak: 0,
+  lastDate: null,
+  level: "A1",
+  recentScores: [],
+  troubleWords: [],
+};
+/** ---------- PERSISTE
+NCE ---------- **/
 function loadProgress() {
+    const saved = localStorage.getItem(STORAGE_KEY);
+  if (!saved) {
+    return { ...DEFAULT_PROGRESS };
+  }
+  try {
+    const parsed = JSON.parse(saved);
+    return { ...DEFAULT_PROGRESS, ...parsed };
+  } catch {
+    return { ...DEFAULT_PROGRESS };
+  }
+
   try {
     return JSON.parse(localStorage.getItem(STORAGE_KEY)) || {
+ 
+
       xp: 0,
       lessonsCompleted: 0,
       streak: 0,
