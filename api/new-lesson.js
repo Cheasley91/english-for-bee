@@ -1,8 +1,7 @@
-// Vercel serverless function: /api/new-lesson
-// POST JSON -> returns a strict JSON lesson (see schema below)
-
+// /api/new-lesson.js
 const OPENAI_URL = "https://api.openai.com/v1/chat/completions";
-const MODEL = "gpt-4o-mini"; // fast+cheap; can swap later
+const PRIMARY_MODEL = "gpt-4o-mini";     // try this first
+const FALLBACK_MODEL = "gpt-4o-mini";    // keep same or change to "gpt-4o" if needed
 
 export default async function handler(req, res) {
   try {
@@ -14,21 +13,47 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: "OPENAI_API_KEY not configured" });
     }
 
-    // —— read request body —— //
     const {
-      level = "A1",            // "A0"|"A1"|"A2"|"B1"|"B2"
-      theme = "market",        // e.g., "market", "cooking"
-      count = 6,               // 6–8 typical for A1/A2
-      review_from = [],        // words/phrases to recycle/avoid
-      last_score = null,       // optional
-      trouble_words = [],      // optional
-      preferred_themes = [],   // optional
+      level = "A1",
+      theme = "market",
+      count = 6,
+      review_from = [],
+      preferred_themes = [],
+      last_score = null,
+      trouble_words = [],
     } = (req.body ?? {});
 
-    // clamp count
     const targetCount = Math.max(4, Math.min(12, Number(count) || 6));
 
-    // —— prompts (system + user) —— //
+    const LEVEL_RULES = {
+      A0: [
+        "Use only very common words (A0).",
+        "Prefer single words and 2–3 word phrases.",
+        "Keep example_en <= 6 words; tts_line_en <= 6 words."
+      ],
+      A1: [
+        "Use common everyday words (A1).",
+        "Short phrases and simple sentences.",
+        "Keep example_en <= 8 words; tts_line_en <= 10 words."
+      ],
+      A2: [
+        "Use frequent A2 vocabulary and collocations.",
+        "Include short sentences with basic grammar (present/past).",
+        "Keep example_en <= 12 words; tts_line_en <= 10 words."
+      ],
+      B1: [
+        "Use B1 vocabulary and common patterns.",
+        "Include multi-sentence examples and light variation.",
+        "Allow example_en up to 16 words; tts_line_en <= 12 words."
+      ],
+      B2: [
+        "Use B2 vocabulary and natural phrasing.",
+        "Include short 2–3 turn mini-dialogues in roleplay.",
+        "Allow example_en up to 20 words; tts_line_en <= 12 words."
+      ]
+    };
+    const levelConstraints = (LEVEL_RULES[level] || LEVEL_RULES.A1).join("\n");
+
     const system = [
       "You are a lesson generator for a Thai learner of English (Bee).",
       "Output STRICT JSON only. No prose. No markdown. No trailing commas.",
@@ -38,10 +63,10 @@ export default async function handler(req, res) {
       "- 'en', 'example_en', 'tts_line_en' must be ASCII only.",
       "- Avoid slang or rare words; everyday topics only.",
       "- Do NOT repeat any item present in 'review_from'.",
-      "- All 'tts_line_en' must be self-contained and <= 10 words.",
-    ].join("\n");
-
-    const schemaHint = `Schema:
+      "- All 'tts_line_en' must be self-contained.",
+      levelConstraints,
+      "",
+      `Schema:
 {
   "id": "string-slug",
   "level": "A0|A1|A2|B1|B2",
@@ -80,7 +105,8 @@ export default async function handler(req, res) {
   },
   "spaced_review": ["1-day","3-day","7-day"],
   "next_lesson_hint": "string"
-}`;
+}`
+    ].join("\n");
 
     const user = [
       "Generate a new lesson given Bee’s progress.",
@@ -88,7 +114,7 @@ export default async function handler(req, res) {
       `Learner profile:
 - Level: ${level}
 - Native language: Thai
-- Preferred themes: ${Array.isArray(preferred_themes) && preferred_themes.length ? preferred_themes.join(", ") : "(none)"} 
+- Preferred themes: ${Array.isArray(preferred_themes) && preferred_themes.length ? preferred_themes.join(", ") : "(none)"}
 - Known items to recycle/avoid: ${JSON.stringify(review_from)}`,
       "",
       `Last lesson summary:
@@ -100,37 +126,44 @@ export default async function handler(req, res) {
 - New vocab target count: ${targetCount}
 - Grammar focus (optional): ""`,
       "",
-      schemaHint,
-      "",
       "Output JSON only. No extra keys."
     ].join("\n");
 
-    // —— single call with JSON mode —— //
-    const first = await openAIChatJSON(system, user);
-    let lesson = safeParse(first);
+    // First attempt: JSON mode (response_format)
+    let text;
+    try {
+      text = await chat(system, user, PRIMARY_MODEL, true);
+    } catch (err1) {
+      // Fallback: no JSON mode, parse manually
+      try {
+        text = await chat(system, user, FALLBACK_MODEL, false);
+      } catch (err2) {
+        const detail = (err2 && (err2.message || String(err2))) || "unknown";
+        return res.status(502).json({ error: "OpenAI call failed", detail });
+      }
+    }
 
-    // —— if malformed, ask the model to repair once —— //
+    let lesson = safeParse(text);
     if (!validLesson(lesson)) {
-      const repairUser = [
-        "Your previous output was not valid JSON per the schema.",
-        "Re-output JSON ONLY. No commentary. No markdown.",
-        schemaHint
-      ].join("\n");
-
-      const repaired = await openAIChatJSON(system, repairUser, first);
-      lesson = safeParse(repaired);
+      // One repair attempt
+      const repair = `Your previous output was not valid JSON per the schema. Re-output JSON ONLY. Do not include commentary or markdown.`;
+      try {
+        const repairedText = await chat(system, repair, PRIMARY_MODEL, true, text);
+        lesson = safeParse(repairedText);
+      } catch {
+        // ignore
+      }
     }
 
     if (!validLesson(lesson)) {
-      return res.status(502).json({ error: "Model returned invalid JSON.", raw: first?.slice?.(0, 2000) });
+      return res.status(502).json({ error: "Model returned invalid JSON", raw: (text || "").slice(0, 1000) });
     }
 
-    // Trim to requested count defensively
+    // Trim to requested count
     if (Array.isArray(lesson.new_vocab) && lesson.new_vocab.length > targetCount) {
       lesson.new_vocab = lesson.new_vocab.slice(0, targetCount);
     }
-
-    // Basic ASCII guard for English fields
+    // ASCII guard for english fields
     for (const it of lesson.new_vocab || []) {
       if (it.en) it.en = asciiOnly(it.en);
       if (it.example_en) it.example_en = asciiOnly(it.example_en);
@@ -139,24 +172,23 @@ export default async function handler(req, res) {
 
     return res.status(200).json({ lesson });
   } catch (e) {
-    console.error(e);
-    return res.status(500).json({ error: "Server error" });
+    console.error("new-lesson server error:", e);
+    return res.status(500).json({ error: "Server error", detail: String(e) });
   }
 }
 
-// ---- helpers ----
-async function openAIChatJSON(system, user, priorOutput) {
+async function chat(system, user, model, useJSONMode, priorOutput) {
   const body = {
-    model: MODEL,
-    response_format: { type: "json_object" }, // enforce JSON object
+    model,
     messages: [
       { role: "system", content: system },
       ...(priorOutput ? [{ role: "assistant", content: priorOutput }] : []),
       { role: "user", content: user },
     ],
     temperature: 0.6,
-    max_tokens: 900, // keep cheap & compact
+    max_tokens: 1000,
   };
+  if (useJSONMode) body.response_format = { type: "json_object" };
 
   const r = await fetch(OPENAI_URL, {
     method: "POST",
@@ -169,7 +201,7 @@ async function openAIChatJSON(system, user, priorOutput) {
 
   if (!r.ok) {
     const t = await r.text().catch(() => "");
-    throw new Error(`OpenAI error ${r.status}: ${t}`);
+    throw new Error(`OpenAI ${r.status}: ${t}`);
   }
   const data = await r.json();
   return data?.choices?.[0]?.message?.content ?? "";
@@ -178,20 +210,15 @@ async function openAIChatJSON(system, user, priorOutput) {
 function safeParse(text) {
   try { return JSON.parse(text); } catch { return null; }
 }
-
 function validLesson(obj) {
   if (!obj || typeof obj !== "object") return false;
-  const requiredTop = ["id", "level", "theme", "new_vocab"];
-  for (const k of requiredTop) if (!(k in obj)) return false;
+  if (!obj.id || !obj.level || !obj.theme) return false;
   if (!Array.isArray(obj.new_vocab) || obj.new_vocab.length === 0) return false;
-  // minimal item checks
   for (const it of obj.new_vocab) {
-    if (!it || typeof it !== "object") return false;
-    if (!it.en || !it.th) return false;
+    if (!it || !it.en || !it.th) return false;
   }
   return true;
 }
-
 function asciiOnly(s) {
   return String(s).replace(/[^\x00-\x7F]/g, "").trim();
 }
