@@ -79,7 +79,7 @@ function decideNextLevelAndCount(level, recentScores) {
 
   let nextLevel = level;
   if (avg >= 0.85 && pos < order.length - 1) nextLevel = order[pos + 1]; // move up if doing great
-  if (avg > 0 && avg <= 0.5 && pos > 0)       nextLevel = order[pos - 1]; // move down if struggling
+  if (avg > 0 && avg <= 0.5 && pos > 0) nextLevel = order[pos - 1]; // move down if struggling
 
   const count = countByLevel[nextLevel] || 6;
   return { nextLevel, count };
@@ -225,7 +225,7 @@ export default function App() {
             setShowThai(false);
             return true;
           }
-        } catch {}
+        } catch { }
       }
       return false;
     } finally {
@@ -309,7 +309,7 @@ export default function App() {
   }
 
   function stopAll(silent = false) {
-    try { stopRec(); } catch {}
+    try { stopRec(); } catch { }
     if (!silent) setHint("");
   }
 
@@ -388,11 +388,11 @@ export default function App() {
 
   function stopAudioNodes() {
     if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
-    try { if (sourceRef.current) sourceRef.current.disconnect(); } catch {}
-    try { if (hpFilterRef.current) hpFilterRef.current.disconnect(); } catch {}
-    try { if (analyserRef.current) analyserRef.current.disconnect(); } catch {}
+    try { if (sourceRef.current) sourceRef.current.disconnect(); } catch { }
+    try { if (hpFilterRef.current) hpFilterRef.current.disconnect(); } catch { }
+    try { if (analyserRef.current) analyserRef.current.disconnect(); } catch { }
     if (audioCtxRef.current) {
-      try { audioCtxRef.current.close(); } catch {}
+      try { audioCtxRef.current.close(); } catch { }
       audioCtxRef.current = null;
     }
   }
@@ -448,7 +448,7 @@ export default function App() {
 
     let nextLevel = currentLevel;
     if (avg >= 0.85 && levelIdx < order.length - 1) nextLevel = order[levelIdx + 1];
-    if (avg > 0 && avg <= 0.5 && levelIdx > 0)       nextLevel = order[levelIdx - 1];
+    if (avg > 0 && avg <= 0.5 && levelIdx > 0) nextLevel = order[levelIdx - 1];
 
     const countByLevel = { A0: 6, A1: 6, A2: 8, B1: 10, B2: 10 };
     const nextCount = countByLevel[nextLevel] || 6;
@@ -520,7 +520,7 @@ export default function App() {
         <div className="w-full">
           {/* Hero */}
           <div className="hero bg-base-100 rounded-none sm:rounded-box shadow mb-4">
-            <div className="hero-content w-full flex-col items-start gap-2">
+            <div className="hero-content w-full flex-col items-center text-center gap-2">
               <h1 className="text-3xl font-extrabold">Hi Bee 👋</h1>
               <p className="text-base-content/70">Practice a little each day. Small steps, big progress.</p>
               <div className="flex gap-2">
