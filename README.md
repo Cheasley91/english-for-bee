@@ -7,7 +7,9 @@ A lightweight English‑practice web app tailored for Thai speakers.
 - Mobile‑first UI (Tailwind + DaisyUI via CDN)
 - Text‑to‑Speech voice picker (Web Speech API)
 - Microphone practice via **Whisper** (serverless `/api/transcribe`)
-- Tracks local progress (XP, words completed); more lessons coming
+- Tracks progress locally or in Firestore (anonymous by default; email/password upgrade keeps data)
+- Thai translations for lesson items (best effort)
+- Daily rotating tip on home and lesson screens
 
 ## Quick Start (Codespaces or local Node 20+)
 
@@ -31,6 +33,16 @@ Open the forwarded port (5173). If the microphone doesn’t work, open the app i
 Set the following environment variable in **Project → Settings → Environment Variables**:
 
 - `OPENAI_API_KEY=<your key>` – used by `/api/transcribe` (do not commit keys).
+
+### Firebase (optional)
+
+Set `VITE_USE_FIREBASE=true` and the `VITE_FB_*` config values to enable Firestore persistence. Users start anonymously; calling `signInEmail(email, password)` signs in or creates an account, and `upgradeAnonToEmail(email, password)` links the anonymous user so progress and lessons stay under the same UID.
+
+### Daily Tips
+
+Tips rotate automatically by calendar day and appear on the home and lesson screens—no setup required.
+
+Thai translations are provided for each lesson item when available and will improve over time.
 
 ### API
 

@@ -4,11 +4,16 @@ import { db, ensureAuth } from "./lib/firebase";
 import {
   MAX_GENERATION_RETRIES,
   lessonFingerprint,
-  loadHashesLS,
-  saveHashesLS,
-  loadProgressLS,
-  saveProgressLS,
+  loadHashes,
+  saveHash,
+  loadProgress,
+  saveProgress,
+  upsertVocab,
+  translateToThaiBulk,
+  UNIQUENESS_ENABLED,
 } from "./lib/storage";
+import { backfillThai } from "./lib/thai-dict";
+import { tipOfTheDay } from "./lib/tips";
 
 /** ---------- CONFIG (initial defaults only) ---------- **/
 const PROMPTS_DEFAULT = ["boat", "vegetable", "very", "west", "apple", "an egg", "the market"];
@@ -23,7 +28,6 @@ const THAI_DEFAULT = {
 // Valid OpenAI TTS voices for `tts-1`
 const VALID_VOICES = ["alloy", "ash", "ballad", "coral", "echo", "fable", "onyx", "nova", "sage", "shimmer", "verse"];
 const DEFAULT_VOICE = "alloy";
-const UNIQUENESS_ENABLED = false; // TEMP: must not block lesson creation
 
 // Silence/VAD settings
 const VAD = {
@@ -46,14 +50,6 @@ const DEFAULT_PROGRESS = {
 };
 
 /** ---------- PERSISTENCE ---------- **/
-function loadProgress() {
-  if (typeof window === "undefined") return { ...DEFAULT_PROGRESS };
-  return loadProgressLS(DEFAULT_PROGRESS);
-}
-function saveProgress(p) {
-  if (typeof window === "undefined") return;
-  saveProgressLS(p);
-}
 const VOCAB_KEY = "efb_vocab_v1";
 function loadVocab() {
   if (typeof window === "undefined") return {};
@@ -132,13 +128,25 @@ export default function App() {
   const [view, setView] = useState("home");
 
   // progress
-  const [progress, setProgress] = useState(loadProgress);
+  const [progress, setProgress] = useState(DEFAULT_PROGRESS);
+  useEffect(() => {
+    (async () => {
+      const p = await loadProgress(DEFAULT_PROGRESS);
+      setProgress(p);
+    })();
+  }, []);
 
   // spaced vocab stats
   const [vocab, setVocab] = useState(loadVocab);
 
   // known lesson hashes
-  const [knownHashes, setKnownHashes] = useState(() => new Set(loadHashesLS()));
+  const [knownHashes, setKnownHashes] = useState(new Set());
+  useEffect(() => {
+    (async () => {
+      const set = await loadHashes();
+      setKnownHashes(set);
+    })();
+  }, []);
 
   // dynamic lesson state (replaces hard-coded lists at runtime)
   const [prompts, setPrompts] = useState(PROMPTS_DEFAULT); // English words/phrases
@@ -181,6 +189,7 @@ export default function App() {
   const target = prompts[idx];
   const allDone = idx >= prompts.length - 1;
   const matchOk = norm(heard) === norm(target);
+  const tip = tipOfTheDay();
 
   // cleanup on unmount
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -189,18 +198,10 @@ export default function App() {
   // persist progress
   useEffect(() => {
     saveProgress(progress);
-    if (!import.meta.env.VITE_USE_FIREBASE) return;
-    (async () => {
-      const u = await ensureAuth();
-      if (u) await setDoc(doc(db, `users/${u.uid}/profiles/${u.uid}`), progress);
-    })();
   }, [progress]);
 
   // persist vocab
   useEffect(() => saveVocab(vocab), [vocab]);
-
-  // persist hashes
-  useEffect(() => saveHashesLS([...knownHashes]), [knownHashes]);
 
   // initial Firebase load
   useEffect(() => {
@@ -208,10 +209,6 @@ export default function App() {
     (async () => {
       const u = await ensureAuth();
       if (!u) return;
-      const hSnap = await getDocs(collection(db, `users/${u.uid}/hashes`));
-      const arr = [];
-      hSnap.forEach((d) => arr.push(d.id));
-      if (arr.length) setKnownHashes(new Set(arr));
       const vSnap = await getDocs(collection(db, `users/${u.uid}/vocab`));
       const vv = {};
       vSnap.forEach((d) => (vv[d.id] = d.data()));
@@ -264,6 +261,7 @@ export default function App() {
       .map((v) => v.term);
     const avoidTerms = Object.keys(vocab).filter((t) => !dueTerms.includes(t));
     let attempt = 0;
+    let lesson = null;
     while (attempt < MAX_GENERATION_RETRIES) {
       try {
         const body = {
@@ -279,43 +277,63 @@ export default function App() {
         });
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
-        const lesson = coerceLessonShape(data);
-        if (UNIQUENESS_ENABLED) {
-          const fp = lessonFingerprint(lesson);
-          if (knownHashes.has(fp)) {
-            attempt++;
-            setGenStatus("duplicate—trying again…");
-            continue;
-          }
-          knownHashes.add(fp);
-          setKnownHashes(new Set(knownHashes));
-          if (import.meta.env.VITE_USE_FIREBASE) {
-            const u = await ensureAuth();
-            if (u) await setDoc(doc(db, `users/${u.uid}/hashes/${fp}`), { createdAt: Date.now() });
-          }
+        lesson = coerceLessonShape(data);
+        lesson.items = backfillThai(lesson.items || []);
+        lesson.fingerprint = lesson.fingerprint || lessonFingerprint(lesson);
+        if (UNIQUENESS_ENABLED && knownHashes.has(lesson.fingerprint)) {
+          attempt++;
+          setGenStatus("duplicate—trying again…");
+          continue;
         }
-        let nextPrompts = Array.isArray(lesson?.items)
-          ? lesson.items.filter((i) => i.type !== "text" && i.term).map((i) => i.term)
-          : [];
-        const mixCount = Math.min(dueTerms.length, Math.round(nextPrompts.length * 0.3));
-        nextPrompts = [...dueTerms.slice(0, mixCount), ...nextPrompts].slice(0, nextPrompts.length);
-        setPrompts(nextPrompts);
-        setThaiMap({});
-        setIdx(0);
-        setHeard("");
-        setShowThai(false);
-        localStorage.setItem("efb_last_lesson_json", JSON.stringify(lesson || null));
-        setLessonLoading(false);
-        setGenStatus("");
-        return true;
+        break;
       } catch (e) {
         console.error("new-lesson error:", e);
         attempt++;
       }
     }
-    setGenStatus("Try again.");
+    if (!lesson) {
+      setGenStatus("Try again.");
+      setLessonLoading(false);
+      return false;
+    }
+
+    await saveHash(lesson.fingerprint);
+    knownHashes.add(lesson.fingerprint);
+    setKnownHashes(new Set(knownHashes));
+
+    if (import.meta.env.VITE_USE_FIREBASE) {
+      const u = await ensureAuth();
+      if (u) {
+        const lessonId = Date.now().toString();
+        await setDoc(doc(db, `users/${u.uid}/lessons/${lessonId}`), {
+          createdAt: Date.now(),
+          title: lesson.title,
+          items: lesson.items,
+          fingerprint: lesson.fingerprint,
+        });
+      }
+    } else {
+      localStorage.setItem("efb_last_lesson_json", JSON.stringify(lesson));
+    }
+
+    let nextPrompts = Array.isArray(lesson?.items)
+      ? lesson.items.filter((i) => i.type !== "text" && i.term).map((i) => i.term)
+      : [];
+    const mixCount = Math.min(dueTerms.length, Math.round(nextPrompts.length * 0.3));
+    nextPrompts = [...dueTerms.slice(0, mixCount), ...nextPrompts].slice(0, nextPrompts.length);
+    const baseThai = {};
+    lesson.items.forEach((i) => {
+      if (i.type !== "text" && i.term) baseThai[i.term] = i.thai || "";
+    });
+    const bulk = translateToThaiBulk(nextPrompts);
+    setPrompts(nextPrompts);
+    setThaiMap({ ...bulk, ...baseThai });
+    setIdx(0);
+    setHeard("");
+    setShowThai(false);
     setLessonLoading(false);
-    return false;
+    setGenStatus("");
+    return true;
   }
 
   /** ---------- RECORDING / TRANSCRIBE ---------- **/
@@ -490,27 +508,7 @@ export default function App() {
   function updateVocab(term, correct) {
     setVocab((prev) => {
       const v = { ...prev };
-      const entry = v[term] || {
-        term,
-        type: "word",
-        seenCount: 0,
-        correctCount: 0,
-        mastery: 0,
-        lastSeenAt: 0,
-        nextReviewAt: 0,
-      };
-      entry.seenCount += 1;
-      if (correct) {
-        entry.correctCount += 1;
-        entry.mastery = Math.min(entry.mastery + 1, 5);
-        const schedule = [1, 3, 7, 14, 30];
-        const days = schedule[Math.min(entry.mastery - 1, 4)] || 1;
-        entry.nextReviewAt = Date.now() + days * 86400000;
-      } else {
-        entry.mastery = Math.max(entry.mastery - 1, 0);
-        entry.nextReviewAt = Date.now() + 60 * 60 * 1000;
-      }
-      entry.lastSeenAt = Date.now();
+      const entry = upsertVocab(term, correct, v[term]);
       v[term] = entry;
       if (import.meta.env.VITE_USE_FIREBASE) {
         (async () => {
@@ -680,15 +678,14 @@ export default function App() {
           {/* Tip of the day */}
           <div className="card bg-base-100 shadow p-4">
             <h3 className="font-semibold mb-1">Tip of the day</h3>
-            <p className="text-sm text-base-content/70">
-              Use <b>an</b> before vowel sounds: <i>an apple</i>, <i>an egg</i>. Use <b>the</b> for something specific (e.g., <i>the market</i>).
-            </p>
+            <p className="text-sm text-base-content/70">{tip}</p>
           </div>
         </div>
       )}
 
       {view === "practice" && (
         <div className="card bg-base-100 w-full max-w-none rounded-none sm:rounded-box shadow p-5 sm:p-6">
+          <p className="text-sm text-base-content/70 mb-2">{tip}</p>
           <h2 className="text-3xl font-extrabold mb-1">{target}</h2>
 
           <div className="flex items-center gap-2 mb-2">

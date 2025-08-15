@@ -1,5 +1,12 @@
 import { initializeApp, getApps } from "firebase/app";
-import { getAuth, signInAnonymously } from "firebase/auth";
+import {
+  getAuth,
+  signInAnonymously,
+  EmailAuthProvider,
+  linkWithCredential,
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+} from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
 import { getAnalytics } from "firebase/analytics";
 
@@ -29,4 +36,19 @@ export async function ensureAuth() {
   if (u) return u;
   await signInAnonymously(auth);
   return auth.currentUser;
+}
+
+export async function upgradeAnonToEmail(email, password) {
+  const user = auth.currentUser;
+  if (!user) throw new Error("No current user");
+  const cred = EmailAuthProvider.credential(email, password);
+  return linkWithCredential(user, cred);
+}
+
+export async function signInEmail(email, password) {
+  try {
+    return await signInWithEmailAndPassword(auth, email, password);
+  } catch {
+    return await createUserWithEmailAndPassword(auth, email, password);
+  }
 }
