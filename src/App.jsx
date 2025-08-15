@@ -1,29 +1,22 @@
 import React, { useEffect, useRef, useState } from "react";
 import { collection, doc, getDocs, setDoc } from "firebase/firestore";
-import { db, ensureAuth } from "./lib/firebase";
+import { auth, db, ensureAuth, loginEmail, upgradeAnonToEmail } from "./lib/firebase";
 import {
   MAX_GENERATION_RETRIES,
   lessonFingerprint,
-  loadHashesLS,
-  saveHashesLS,
-  loadProgressLS,
-  saveProgressLS,
+  loadHashes,
+  saveHash,
+  loadProgress,
+  saveProgress,
+  upsertVocab,
+  translateToThaiBulk,
+  UNIQUENESS_ENABLED,
 } from "./lib/storage";
-
-/** ---------- CONFIG (initial defaults only) ---------- **/
-const PROMPTS_DEFAULT = ["boat", "vegetable", "very", "west", "apple", "an egg", "the market"];
-const THAI_DEFAULT = {
-  "vegetable": "ผัก",
-  "very": "มาก",
-  "west": "ตะวันตก",
-  "apple": "แอปเปิล",
-  "an egg": "ไข่หนึ่งฟอง",
-  "the market": "ตลาด",
-};
+import { backfillThai } from "./lib/thai-dict";
+import { tipOfTheDay } from "./lib/tips";
 // Valid OpenAI TTS voices for `tts-1`
 const VALID_VOICES = ["alloy", "ash", "ballad", "coral", "echo", "fable", "onyx", "nova", "sage", "shimmer", "verse"];
 const DEFAULT_VOICE = "alloy";
-const UNIQUENESS_ENABLED = false; // TEMP: must not block lesson creation
 
 // Silence/VAD settings
 const VAD = {
@@ -46,14 +39,6 @@ const DEFAULT_PROGRESS = {
 };
 
 /** ---------- PERSISTENCE ---------- **/
-function loadProgress() {
-  if (typeof window === "undefined") return { ...DEFAULT_PROGRESS };
-  return loadProgressLS(DEFAULT_PROGRESS);
-}
-function saveProgress(p) {
-  if (typeof window === "undefined") return;
-  saveProgressLS(p);
-}
 const VOCAB_KEY = "efb_vocab_v1";
 function loadVocab() {
   if (typeof window === "undefined") return {};
@@ -101,7 +86,7 @@ function coerceLessonShape(apiData) {
 
   // Fallback so UI never renders blanks
   if (!lesson.items || lesson.items.length === 0) {
-    const fallback = ["apple", "banana", "rice", "chicken", "fish", "bread"];
+    const fallback = ["hello", "goodbye", "please", "thank you", "bus", "market"];
     lesson.items = fallback.map(term => ({ type: "word", term }));
   }
 
@@ -129,20 +114,35 @@ function rootMeanSquare(buf) {
 /** ---------- MAIN APP ---------- **/
 export default function App() {
   // routing
-  const [view, setView] = useState("home");
+  const [view, setView] = useState("login");
 
   // progress
-  const [progress, setProgress] = useState(loadProgress);
+  const [progress, setProgress] = useState(DEFAULT_PROGRESS);
+  useEffect(() => {
+    (async () => {
+      const p = await loadProgress(DEFAULT_PROGRESS);
+      setProgress(p);
+    })();
+  }, []);
 
   // spaced vocab stats
   const [vocab, setVocab] = useState(loadVocab);
 
   // known lesson hashes
-  const [knownHashes, setKnownHashes] = useState(() => new Set(loadHashesLS()));
+  const [knownHashes, setKnownHashes] = useState(new Set());
+  useEffect(() => {
+    (async () => {
+      const set = await loadHashes();
+      setKnownHashes(set);
+    })();
+  }, []);
 
   // dynamic lesson state (replaces hard-coded lists at runtime)
-  const [prompts, setPrompts] = useState(PROMPTS_DEFAULT); // English words/phrases
-  const [thaiMap, setThaiMap] = useState(THAI_DEFAULT);    // { en: th }
+  const [prompts, setPrompts] = useState([]); // English words/phrases
+  const [thaiMap, setThaiMap] = useState({}); // { en: th }
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [authError, setAuthError] = useState("");
   const [lessonLoading, setLessonLoading] = useState(false);
   const [genStatus, setGenStatus] = useState("");
 
@@ -181,6 +181,7 @@ export default function App() {
   const target = prompts[idx];
   const allDone = idx >= prompts.length - 1;
   const matchOk = norm(heard) === norm(target);
+  const tip = tipOfTheDay();
 
   // cleanup on unmount
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -189,18 +190,10 @@ export default function App() {
   // persist progress
   useEffect(() => {
     saveProgress(progress);
-    if (!import.meta.env.VITE_USE_FIREBASE) return;
-    (async () => {
-      const u = await ensureAuth();
-      if (u) await setDoc(doc(db, `users/${u.uid}/profiles/${u.uid}`), progress);
-    })();
   }, [progress]);
 
   // persist vocab
   useEffect(() => saveVocab(vocab), [vocab]);
-
-  // persist hashes
-  useEffect(() => saveHashesLS([...knownHashes]), [knownHashes]);
 
   // initial Firebase load
   useEffect(() => {
@@ -208,16 +201,45 @@ export default function App() {
     (async () => {
       const u = await ensureAuth();
       if (!u) return;
-      const hSnap = await getDocs(collection(db, `users/${u.uid}/hashes`));
-      const arr = [];
-      hSnap.forEach((d) => arr.push(d.id));
-      if (arr.length) setKnownHashes(new Set(arr));
       const vSnap = await getDocs(collection(db, `users/${u.uid}/vocab`));
       const vv = {};
       vSnap.forEach((d) => (vv[d.id] = d.data()));
       if (Object.keys(vv).length) setVocab(vv);
     })();
   }, []);
+
+  useEffect(() => {
+    if (auth.currentUser && !auth.currentUser.isAnonymous) {
+      setView("home");
+      fetchNewLesson({ level: progress.level || "A1", topic: "daily life", count: 6 });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function handleLogin() {
+    try {
+      await loginEmail(email, password);
+      setView("home");
+      await fetchNewLesson({ level: progress.level || "A1", topic: "daily life", count: 6 });
+    } catch (e) {
+      setAuthError(e.message);
+    }
+  }
+
+  async function handleRegister() {
+    try {
+      await upgradeAnonToEmail(email, password);
+      setView("home");
+      await fetchNewLesson({ level: progress.level || "A1", topic: "daily life", count: 6 });
+    } catch (e) {
+      setAuthError(e.message);
+    }
+  }
+
+  async function handleGuest() {
+    setView("home");
+    await fetchNewLesson({ level: progress.level || "A1", topic: "daily life", count: 6 });
+  }
 
   /** ---------- TTS (OpenAI via /api/tts) with fallback ---------- **/
   async function fetchTTS(text, v) {
@@ -254,16 +276,17 @@ export default function App() {
   }
 
   /** ---------- Fetch a NEW LESSON from /api/new-lesson ---------- **/
-  async function fetchNewLesson({ level = "A1", topic = "market", count = 6 } = {}) {
+  async function fetchNewLesson({ level = "A1", topic = "daily life", count = 6 } = {}) {
     setLessonLoading(true);
     setGenStatus("");
-    const topics = ["market", "travel", "food", "home", "work"];
+    const topics = ["daily life", "travel", "food", "home", "work", "shopping"];
     const now = Date.now();
     const dueTerms = Object.values(vocab)
       .filter((v) => v.nextReviewAt && v.nextReviewAt <= now)
       .map((v) => v.term);
     const avoidTerms = Object.keys(vocab).filter((t) => !dueTerms.includes(t));
     let attempt = 0;
+    let lesson = null;
     while (attempt < MAX_GENERATION_RETRIES) {
       try {
         const body = {
@@ -279,43 +302,63 @@ export default function App() {
         });
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
-        const lesson = coerceLessonShape(data);
-        if (UNIQUENESS_ENABLED) {
-          const fp = lessonFingerprint(lesson);
-          if (knownHashes.has(fp)) {
-            attempt++;
-            setGenStatus("duplicate—trying again…");
-            continue;
-          }
-          knownHashes.add(fp);
-          setKnownHashes(new Set(knownHashes));
-          if (import.meta.env.VITE_USE_FIREBASE) {
-            const u = await ensureAuth();
-            if (u) await setDoc(doc(db, `users/${u.uid}/hashes/${fp}`), { createdAt: Date.now() });
-          }
+        lesson = coerceLessonShape(data);
+        lesson.items = backfillThai(lesson.items || []);
+        lesson.fingerprint = lesson.fingerprint || lessonFingerprint(lesson);
+        if (UNIQUENESS_ENABLED && knownHashes.has(lesson.fingerprint)) {
+          attempt++;
+          setGenStatus("duplicate—trying again…");
+          continue;
         }
-        let nextPrompts = Array.isArray(lesson?.items)
-          ? lesson.items.filter((i) => i.type !== "text" && i.term).map((i) => i.term)
-          : [];
-        const mixCount = Math.min(dueTerms.length, Math.round(nextPrompts.length * 0.3));
-        nextPrompts = [...dueTerms.slice(0, mixCount), ...nextPrompts].slice(0, nextPrompts.length);
-        setPrompts(nextPrompts);
-        setThaiMap({});
-        setIdx(0);
-        setHeard("");
-        setShowThai(false);
-        localStorage.setItem("efb_last_lesson_json", JSON.stringify(lesson || null));
-        setLessonLoading(false);
-        setGenStatus("");
-        return true;
+        break;
       } catch (e) {
         console.error("new-lesson error:", e);
         attempt++;
       }
     }
-    setGenStatus("Try again.");
+    if (!lesson) {
+      setGenStatus("Try again.");
+      setLessonLoading(false);
+      return false;
+    }
+
+    await saveHash(lesson.fingerprint);
+    knownHashes.add(lesson.fingerprint);
+    setKnownHashes(new Set(knownHashes));
+
+    if (import.meta.env.VITE_USE_FIREBASE) {
+      const u = await ensureAuth();
+      if (u) {
+        const lessonId = Date.now().toString();
+        await setDoc(doc(db, `users/${u.uid}/lessons/${lessonId}`), {
+          createdAt: Date.now(),
+          title: lesson.title,
+          items: lesson.items,
+          fingerprint: lesson.fingerprint,
+        });
+      }
+    } else {
+      localStorage.setItem("efb_last_lesson_json", JSON.stringify(lesson));
+    }
+
+    let nextPrompts = Array.isArray(lesson?.items)
+      ? lesson.items.filter((i) => i.type !== "text" && i.term).map((i) => i.term)
+      : [];
+    const mixCount = Math.min(dueTerms.length, Math.round(nextPrompts.length * 0.3));
+    nextPrompts = [...dueTerms.slice(0, mixCount), ...nextPrompts].slice(0, nextPrompts.length);
+    const baseThai = {};
+    lesson.items.forEach((i) => {
+      if (i.type !== "text" && i.term) baseThai[i.term] = i.thai || "";
+    });
+    const bulk = translateToThaiBulk(nextPrompts);
+    setPrompts(nextPrompts);
+    setThaiMap({ ...bulk, ...baseThai });
+    setIdx(0);
+    setHeard("");
+    setShowThai(false);
     setLessonLoading(false);
-    return false;
+    setGenStatus("");
+    return true;
   }
 
   /** ---------- RECORDING / TRANSCRIBE ---------- **/
@@ -490,27 +533,7 @@ export default function App() {
   function updateVocab(term, correct) {
     setVocab((prev) => {
       const v = { ...prev };
-      const entry = v[term] || {
-        term,
-        type: "word",
-        seenCount: 0,
-        correctCount: 0,
-        mastery: 0,
-        lastSeenAt: 0,
-        nextReviewAt: 0,
-      };
-      entry.seenCount += 1;
-      if (correct) {
-        entry.correctCount += 1;
-        entry.mastery = Math.min(entry.mastery + 1, 5);
-        const schedule = [1, 3, 7, 14, 30];
-        const days = schedule[Math.min(entry.mastery - 1, 4)] || 1;
-        entry.nextReviewAt = Date.now() + days * 86400000;
-      } else {
-        entry.mastery = Math.max(entry.mastery - 1, 0);
-        entry.nextReviewAt = Date.now() + 60 * 60 * 1000;
-      }
-      entry.lastSeenAt = Date.now();
+      const entry = upsertVocab(term, correct, v[term]);
       v[term] = entry;
       if (import.meta.env.VITE_USE_FIREBASE) {
         (async () => {
@@ -593,7 +616,7 @@ export default function App() {
     // Ask the server for a fresh lesson (avoid repeating the current words)
     await fetchNewLesson({
       level: updated.level,
-      topic: "market", // rotate later
+      topic: "daily life",
       count: nextCount,
     });
 
@@ -606,38 +629,91 @@ export default function App() {
   return (
     <div className="min-h-screen bg-base-200 p-0 sm:p-6">
       {/* Navbar */}
-      <div className="navbar bg-base-100 rounded-none sm:rounded-box shadow mb-6">
-        <div className="flex-1 px-2 text-xl font-bold">🐝 English for Bee</div>
-        <div className="flex-none flex items-center gap-2">
-          <label className="label cursor-pointer gap-2">
-            <span className="label-text">Voice</span>
-            <select
-              className="select select-sm select-bordered"
-              value={voice}
-              onChange={(e) => setVoice(e.target.value)}
-              title="Voice"
-            >
-              {VALID_VOICES.map(v => (
-                <option key={v} value={v}>
-                  {v.charAt(0).toUpperCase() + v.slice(1)}
-                </option>
-              ))}
-            </select>
-          </label>
+      {view !== "login" && view !== "register" && (
+        <div className="navbar bg-base-100 rounded-none sm:rounded-box shadow mb-6">
+          <div className="flex-1 px-2 text-xl font-bold">🐝 English for Bee</div>
+          <div className="flex-none flex items-center gap-2">
+            <label className="label cursor-pointer gap-2">
+              <span className="label-text">Voice</span>
+              <select
+                className="select select-sm select-bordered"
+                value={voice}
+                onChange={(e) => setVoice(e.target.value)}
+                title="Voice"
+              >
+                {VALID_VOICES.map(v => (
+                  <option key={v} value={v}>
+                    {v.charAt(0).toUpperCase() + v.slice(1)}
+                  </option>
+                ))}
+              </select>
+            </label>
 
-          <button className={`btn btn-ghost ${view === "home" ? "btn-active" : ""}`} onClick={() => setView("home")}>
-            Home
-          </button>
-          <button
-            className={`btn btn-ghost ${view === "practice" ? "btn-active" : ""}`}
-            onClick={() => { resetPractice(); setView("practice"); }}
-          >
-            Practice
-          </button>
+            <button className={`btn btn-ghost ${view === "home" ? "btn-active" : ""}`} onClick={() => setView("home")}>
+              Home
+            </button>
+            <button
+              className={`btn btn-ghost ${view === "practice" ? "btn-active" : ""}`}
+              onClick={() => { resetPractice(); setView("practice"); }}
+            >
+              Practice
+            </button>
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Views */}
+      {view === "login" && (
+        <div className="card bg-base-100 w-full max-w-sm mx-auto shadow p-6">
+          <h2 className="text-2xl font-bold mb-2">Sign in</h2>
+          <input
+            type="email"
+            placeholder="Email"
+            className="input input-bordered w-full mb-2"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+          />
+          <input
+            type="password"
+            placeholder="Password"
+            className="input input-bordered w-full mb-2"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
+          {authError && <p className="text-error text-sm mb-2">{authError}</p>}
+          <div className="flex flex-col gap-2">
+            <button className="btn btn-primary" onClick={handleLogin}>Login</button>
+            <button className="btn" onClick={() => { setAuthError(""); setView("register"); }}>Register</button>
+            <button className="btn btn-ghost" onClick={handleGuest}>Continue as guest</button>
+          </div>
+        </div>
+      )}
+
+      {view === "register" && (
+        <div className="card bg-base-100 w-full max-w-sm mx-auto shadow p-6">
+          <h2 className="text-2xl font-bold mb-2">Register</h2>
+          <input
+            type="email"
+            placeholder="Email"
+            className="input input-bordered w-full mb-2"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+          />
+          <input
+            type="password"
+            placeholder="Password"
+            className="input input-bordered w-full mb-2"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
+          {authError && <p className="text-error text-sm mb-2">{authError}</p>}
+          <div className="flex flex-col gap-2">
+            <button className="btn btn-primary" onClick={handleRegister}>Create account</button>
+            <button className="btn" onClick={() => { setAuthError(""); setView("login"); }}>Back to login</button>
+          </div>
+        </div>
+      )}
+
       {view === "home" && (
         <div className="w-full">
           {/* Hero */}
@@ -649,7 +725,7 @@ export default function App() {
                 <button className="btn btn-primary" onClick={() => setView("practice")}>Continue practice</button>
                 <button
                   className={`btn ${lessonLoading ? "btn-disabled" : "btn-secondary"}`}
-                  onClick={() => fetchNewLesson({ level: progress.level || "A1", topic: "cooking", count: 6 })}
+                  onClick={() => fetchNewLesson({ level: progress.level || "A1", topic: "daily life", count: 6 })}
                   disabled={lessonLoading}
                 >
                   {lessonLoading ? "Loading…" : "New lesson"}
@@ -680,15 +756,14 @@ export default function App() {
           {/* Tip of the day */}
           <div className="card bg-base-100 shadow p-4">
             <h3 className="font-semibold mb-1">Tip of the day</h3>
-            <p className="text-sm text-base-content/70">
-              Use <b>an</b> before vowel sounds: <i>an apple</i>, <i>an egg</i>. Use <b>the</b> for something specific (e.g., <i>the market</i>).
-            </p>
+            <p className="text-sm text-base-content/70">{tip}</p>
           </div>
         </div>
       )}
 
       {view === "practice" && (
         <div className="card bg-base-100 w-full max-w-none rounded-none sm:rounded-box shadow p-5 sm:p-6">
+          <p className="text-sm text-base-content/70 mb-2">{tip}</p>
           <h2 className="text-3xl font-extrabold mb-1">{target}</h2>
 
           <div className="flex items-center gap-2 mb-2">

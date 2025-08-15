@@ -46,11 +46,17 @@ function parseItems(arr) {
     }
     if (typeof it !== "object") continue;
     if ((it.type === "word" || it.type === "phrase") && typeof it.term === "string" && it.term.trim()) {
-      out.push({ type: it.type, term: it.term.trim() });
+      const obj = { type: it.type, term: it.term.trim() };
+      if (typeof it.thai === "string" && it.thai.trim()) obj.thai = it.thai.trim();
+      out.push(obj);
     } else if (it.type === "text" && typeof it.content === "string" && it.content.trim()) {
-      out.push({ type: "text", content: it.content.trim() });
+      const obj = { type: "text", content: it.content.trim() };
+      if (typeof it.thai === "string" && it.thai.trim()) obj.thai = it.thai.trim();
+      out.push(obj);
     } else if (typeof it.term === "string" && it.term.trim()) {
-      out.push({ type: "word", term: it.term.trim() });
+      const obj = { type: "word", term: it.term.trim() };
+      if (typeof it.thai === "string" && it.thai.trim()) obj.thai = it.thai.trim();
+      out.push(obj);
     }
   }
   return out;
@@ -59,7 +65,7 @@ function parseItems(arr) {
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
   try {
-    const { level = "beginner", count = 8, topic = "general", avoidTerms = [] } = req.body ?? {};
+    const { level = "beginner", count = 8, topic = "daily life", avoidTerms = [] } = req.body ?? {};
     if (!process.env.OPENAI_API_KEY) {
       return res.status(500).json({ error: "Missing OPENAI_API_KEY" });
     }
@@ -77,11 +83,11 @@ export default async function handler(req, res) {
           {
             role: "system",
             content:
-              "You generate compact ESL lessons for Thai learners. Output JSON with a title and 6-12 items (words/phrases or optional short 'text' intro).",
+              "You generate compact ESL lessons for Thai learners. Respond with JSON only in the shape {title, items:[{type:'word'|'phrase'|'text', term?, content?, thai?}]}. Each word or phrase must include a basic Thai translation in the 'thai' field.",
           },
           {
             role: "user",
-            content: `Level: ${level}, Count: ${count}, Topic: ${topic}. Avoid terms: ${avoidTerms.join(", ")}. Return JSON only.`,
+            content: `Level: ${level}, Count: ${count}, Topic: ${topic}. Avoid terms: ${avoidTerms.join(", ")}.`,
           },
         ],
         temperature: 0.7,
