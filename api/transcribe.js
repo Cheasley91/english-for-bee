@@ -1,3 +1,5 @@
+/* eslint-env node */
+/* global process */
 // api/transcribe.js — Vercel serverless function (Node)
 export const config = { api: { bodyParser: false } };
 
