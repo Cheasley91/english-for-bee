@@ -23,6 +23,7 @@ const THAI_DEFAULT = {
 // Valid OpenAI TTS voices for `tts-1`
 const VALID_VOICES = ["alloy", "ash", "ballad", "coral", "echo", "fable", "onyx", "nova", "sage", "shimmer", "verse"];
 const DEFAULT_VOICE = "alloy";
+const UNIQUENESS_ENABLED = false; // TEMP: must not block lesson creation
 
 // Silence/VAD settings
 const VAD = {
@@ -94,6 +95,7 @@ function coerceLessonShape(apiData) {
 
     if (unique.length > 0) {
       lesson.items = unique.map(term => ({ type: "word", term }));
+      console.info("coerced items:", lesson.items);
     }
   }
 
@@ -225,6 +227,7 @@ export default function App() {
     return await resp.blob(); // audio/mpeg
   }
   async function speak(text) {
+    if (!text) return;
     try {
       setTtsBusy(true);
       let blob;
@@ -277,20 +280,22 @@ export default function App() {
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
         const lesson = coerceLessonShape(data);
-        const fp = lessonFingerprint(lesson);
-        if (knownHashes.has(fp)) {
-          attempt++;
-          setGenStatus("duplicate—trying again…");
-          continue;
-        }
-        knownHashes.add(fp);
-        setKnownHashes(new Set(knownHashes));
-        if (import.meta.env.VITE_USE_FIREBASE) {
-          const u = await ensureAuth();
-          if (u) await setDoc(doc(db, `users/${u.uid}/hashes/${fp}`), { createdAt: Date.now() });
+        if (UNIQUENESS_ENABLED) {
+          const fp = lessonFingerprint(lesson);
+          if (knownHashes.has(fp)) {
+            attempt++;
+            setGenStatus("duplicate—trying again…");
+            continue;
+          }
+          knownHashes.add(fp);
+          setKnownHashes(new Set(knownHashes));
+          if (import.meta.env.VITE_USE_FIREBASE) {
+            const u = await ensureAuth();
+            if (u) await setDoc(doc(db, `users/${u.uid}/hashes/${fp}`), { createdAt: Date.now() });
+          }
         }
         let nextPrompts = Array.isArray(lesson?.items)
-          ? lesson.items.filter((i) => i.type !== "text").map((i) => i.term)
+          ? lesson.items.filter((i) => i.type !== "text" && i.term).map((i) => i.term)
           : [];
         const mixCount = Math.min(dueTerms.length, Math.round(nextPrompts.length * 0.3));
         nextPrompts = [...dueTerms.slice(0, mixCount), ...nextPrompts].slice(0, nextPrompts.length);
@@ -711,7 +716,7 @@ export default function App() {
           </p>
 
           <div className="flex gap-2 flex-wrap items-center">
-            <button className="btn" onClick={() => speak(target)} disabled={ttsBusy}>
+            <button className="btn" onClick={() => speak(target)} disabled={ttsBusy || !target}>
               {ttsBusy ? "Loading…" : "🔊 Listen"}
             </button>
             {!listening ? (
