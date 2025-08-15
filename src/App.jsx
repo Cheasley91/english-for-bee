@@ -1,4 +1,14 @@
 import React, { useEffect, useRef, useState } from "react";
+import { collection, doc, getDocs, setDoc } from "firebase/firestore";
+import { db, ensureAuth } from "./lib/firebase";
+import {
+  MAX_GENERATION_RETRIES,
+  lessonFingerprint,
+  loadHashesLS,
+  saveHashesLS,
+  loadProgressLS,
+  saveProgressLS,
+} from "./lib/storage";
 
 /** ---------- CONFIG (initial defaults only) ---------- **/
 const PROMPTS_DEFAULT = ["boat", "vegetable", "very", "west", "apple", "an egg", "the market"];
@@ -10,8 +20,6 @@ const THAI_DEFAULT = {
   "an egg": "ไข่หนึ่งฟอง",
   "the market": "ตลาด",
 };
-const STORAGE_KEY = "efb_progress_v1";
-
 // Valid OpenAI TTS voices for `tts-1`
 const VALID_VOICES = ["alloy", "ash", "ballad", "coral", "echo", "fable", "onyx", "nova", "sage", "shimmer", "verse"];
 const DEFAULT_VOICE = "alloy";
@@ -35,46 +43,33 @@ const DEFAULT_PROGRESS = {
   recentScores: [],
   troubleWords: [],
 };
-/** ---------- PERSISTE
-NCE ---------- **/
+
+/** ---------- PERSISTENCE ---------- **/
 function loadProgress() {
-    const saved = localStorage.getItem(STORAGE_KEY);
-  if (!saved) {
-    return { ...DEFAULT_PROGRESS };
-  }
+  if (typeof window === "undefined") return { ...DEFAULT_PROGRESS };
+  return loadProgressLS(DEFAULT_PROGRESS);
+}
+function saveProgress(p) {
+  if (typeof window === "undefined") return;
+  saveProgressLS(p);
+}
+const VOCAB_KEY = "efb_vocab_v1";
+function loadVocab() {
+  if (typeof window === "undefined") return {};
   try {
-    const parsed = JSON.parse(saved);
-    return { ...DEFAULT_PROGRESS, ...parsed };
+    return JSON.parse(localStorage.getItem(VOCAB_KEY)) || {};
   } catch {
-    return { ...DEFAULT_PROGRESS };
-  }
-
-  try {
-    return JSON.parse(localStorage.getItem(STORAGE_KEY)) || {
- 
-
-      xp: 0,
-      lessonsCompleted: 0,
-      streak: 0,
-      lastDate: null,
-      level: "A1",
-      recentScores: [],
-      troubleWords: [],
-    };
-  } catch {
-    // Same shape as above, used if localStorage is empty or unreadable
-    return {
-      xp: 0,
-      lessonsCompleted: 0,
-      streak: 0,
-      lastDate: null,
-      level: "A1",
-      recentScores: [],
-      troubleWords: [],
-    };
+    return {};
   }
 }
-function saveProgress(p) { localStorage.setItem(STORAGE_KEY, JSON.stringify(p)); }
+function saveVocab(v) {
+  if (typeof window === "undefined") return;
+  try {
+    localStorage.setItem(VOCAB_KEY, JSON.stringify(v));
+  } catch {
+    /* ignore */
+  }
+}
 function todayISO() { return new Date().toISOString().slice(0, 10); }
 
 /** ---------- HELPERS (pure functions) ---------- **/
@@ -92,21 +87,6 @@ function rootMeanSquare(buf) {
   for (let i = 0; i < buf.length; i++) { const v = buf[i]; sum += v * v; }
   return Math.sqrt(sum / buf.length);
 }
-function decideNextLevelAndCount(level, recentScores) {
-  const last3 = recentScores.slice(-3);
-  const avg = last3.length ? (last3.reduce((a, b) => a + b, 0) / last3.length) : 0;
-
-  const countByLevel = { A0: 6, A1: 6, A2: 8, B1: 10, B2: 10 };
-  const order = ["A0", "A1", "A2", "B1", "B2"];
-  const pos = Math.max(0, order.indexOf(level));
-
-  let nextLevel = level;
-  if (avg >= 0.85 && pos < order.length - 1) nextLevel = order[pos + 1]; // move up if doing great
-  if (avg > 0 && avg <= 0.5 && pos > 0) nextLevel = order[pos - 1]; // move down if struggling
-
-  const count = countByLevel[nextLevel] || 6;
-  return { nextLevel, count };
-}
 
 /** ---------- MAIN APP ---------- **/
 export default function App() {
@@ -116,10 +96,17 @@ export default function App() {
   // progress
   const [progress, setProgress] = useState(loadProgress);
 
+  // spaced vocab stats
+  const [vocab, setVocab] = useState(loadVocab);
+
+  // known lesson hashes
+  const [knownHashes, setKnownHashes] = useState(() => new Set(loadHashesLS()));
+
   // dynamic lesson state (replaces hard-coded lists at runtime)
   const [prompts, setPrompts] = useState(PROMPTS_DEFAULT); // English words/phrases
   const [thaiMap, setThaiMap] = useState(THAI_DEFAULT);    // { en: th }
   const [lessonLoading, setLessonLoading] = useState(false);
+  const [genStatus, setGenStatus] = useState("");
 
   // practice state
   const [idx, setIdx] = useState(0);
@@ -158,10 +145,41 @@ export default function App() {
   const matchOk = norm(heard) === norm(target);
 
   // cleanup on unmount
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => () => stopAll(true), []);
 
   // persist progress
-  useEffect(() => saveProgress(progress), [progress]);
+  useEffect(() => {
+    saveProgress(progress);
+    if (!import.meta.env.VITE_USE_FIREBASE) return;
+    (async () => {
+      const u = await ensureAuth();
+      if (u) await setDoc(doc(db, `users/${u.uid}/profiles/${u.uid}`), progress);
+    })();
+  }, [progress]);
+
+  // persist vocab
+  useEffect(() => saveVocab(vocab), [vocab]);
+
+  // persist hashes
+  useEffect(() => saveHashesLS([...knownHashes]), [knownHashes]);
+
+  // initial Firebase load
+  useEffect(() => {
+    if (!import.meta.env.VITE_USE_FIREBASE) return;
+    (async () => {
+      const u = await ensureAuth();
+      if (!u) return;
+      const hSnap = await getDocs(collection(db, `users/${u.uid}/hashes`));
+      const arr = [];
+      hSnap.forEach((d) => arr.push(d.id));
+      if (arr.length) setKnownHashes(new Set(arr));
+      const vSnap = await getDocs(collection(db, `users/${u.uid}/vocab`));
+      const vv = {};
+      vSnap.forEach((d) => (vv[d.id] = d.data()));
+      if (Object.keys(vv).length) setVocab(vv);
+    })();
+  }, []);
 
   /** ---------- TTS (OpenAI via /api/tts) with fallback ---------- **/
   async function fetchTTS(text, v) {
@@ -197,63 +215,66 @@ export default function App() {
   }
 
   /** ---------- Fetch a NEW LESSON from /api/new-lesson ---------- **/
-  async function fetchNewLesson({ level = "A1", theme = "market", count = 6, review_from = [] } = {}) {
+  async function fetchNewLesson({ level = "A1", topic = "market", count = 6 } = {}) {
     setLessonLoading(true);
-    try {
-      const resp = await fetch("/api/new-lesson", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ level, theme, count, review_from })
-      });
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      const data = await resp.json();
-
-      const items = data?.lesson?.new_vocab || [];
-      if (!Array.isArray(items) || items.length === 0) throw new Error("No items returned");
-
-      // build new lists
-      const nextPrompts = items.map(it => (it.en || "").trim()).filter(Boolean);
-      const nextThai = {};
-      for (const it of items) if (it.en && it.th) nextThai[it.en] = it.th;
-
-      // apply to state
-      setPrompts(nextPrompts);
-      setThaiMap(nextThai);
-
-      // reset practice for new lesson
-      setIdx(0);
-      setHeard("");
-      setShowThai(false);
-
-      // cache for fallback
-      localStorage.setItem("efb_last_lesson_json", JSON.stringify(data.lesson || null));
-      return true;
-    } catch (e) {
-      console.error("new-lesson error:", e);
-      alert("Couldn’t load a new lesson. Using your last one.");
-      // fallback: try cached lesson
-      const cached = localStorage.getItem("efb_last_lesson_json");
-      if (cached) {
-        try {
-          const lesson = JSON.parse(cached);
-          const items = Array.isArray(lesson?.new_vocab) ? lesson.new_vocab : [];
-          if (items.length) {
-            const nextPrompts = items.map(it => (it.en || "").trim()).filter(Boolean);
-            const nextThai = {};
-            for (const it of items) if (it.en && it.th) nextThai[it.en] = it.th;
-            setPrompts(nextPrompts);
-            setThaiMap(nextThai);
-            setIdx(0);
-            setHeard("");
-            setShowThai(false);
-            return true;
-          }
-        } catch { }
+    setGenStatus("");
+    const topics = ["market", "travel", "food", "home", "work"];
+    const now = Date.now();
+    const dueTerms = Object.values(vocab)
+      .filter((v) => v.nextReviewAt && v.nextReviewAt <= now)
+      .map((v) => v.term);
+    const avoidTerms = Object.keys(vocab).filter((t) => !dueTerms.includes(t));
+    let attempt = 0;
+    while (attempt < MAX_GENERATION_RETRIES) {
+      try {
+        const body = {
+          level,
+          count,
+          topic: attempt === 0 ? topic : topics[attempt % topics.length],
+          avoidTerms,
+        };
+        const resp = await fetch("/api/new-lesson", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        const lesson = data?.lesson;
+        const fp = lessonFingerprint(lesson);
+        if (knownHashes.has(fp)) {
+          attempt++;
+          setGenStatus("duplicate—trying again…");
+          continue;
+        }
+        knownHashes.add(fp);
+        setKnownHashes(new Set(knownHashes));
+        if (import.meta.env.VITE_USE_FIREBASE) {
+          const u = await ensureAuth();
+          if (u) await setDoc(doc(db, `users/${u.uid}/hashes/${fp}`), { createdAt: Date.now() });
+        }
+        let nextPrompts = Array.isArray(lesson?.items)
+          ? lesson.items.filter((i) => i.type !== "text").map((i) => i.term)
+          : [];
+        const mixCount = Math.min(dueTerms.length, Math.round(nextPrompts.length * 0.3));
+        nextPrompts = [...dueTerms.slice(0, mixCount), ...nextPrompts].slice(0, nextPrompts.length);
+        setPrompts(nextPrompts);
+        setThaiMap({});
+        setIdx(0);
+        setHeard("");
+        setShowThai(false);
+        localStorage.setItem("efb_last_lesson_json", JSON.stringify(lesson || null));
+        setLessonLoading(false);
+        setGenStatus("");
+        return true;
+      } catch (e) {
+        console.error("new-lesson error:", e);
+        attempt++;
       }
-      return false;
-    } finally {
-      setLessonLoading(false);
     }
+    setGenStatus("Try again.");
+    setLessonLoading(false);
+    return false;
   }
 
   /** ---------- RECORDING / TRANSCRIBE ---------- **/
@@ -332,7 +353,7 @@ export default function App() {
   }
 
   function stopAll(silent = false) {
-    try { stopRec(); } catch { }
+    try { stopRec(); } catch { /* ignore */ }
     if (!silent) setHint("");
   }
 
@@ -411,11 +432,11 @@ export default function App() {
 
   function stopAudioNodes() {
     if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
-    try { if (sourceRef.current) sourceRef.current.disconnect(); } catch { }
-    try { if (hpFilterRef.current) hpFilterRef.current.disconnect(); } catch { }
-    try { if (analyserRef.current) analyserRef.current.disconnect(); } catch { }
+    try { if (sourceRef.current) sourceRef.current.disconnect(); } catch { /* ignore */ }
+    try { if (hpFilterRef.current) hpFilterRef.current.disconnect(); } catch { /* ignore */ }
+    try { if (analyserRef.current) analyserRef.current.disconnect(); } catch { /* ignore */ }
     if (audioCtxRef.current) {
-      try { audioCtxRef.current.close(); } catch { }
+      try { audioCtxRef.current.close(); } catch { /* ignore */ }
       audioCtxRef.current = null;
     }
   }
@@ -425,9 +446,46 @@ export default function App() {
     if (maxTimerRef.current) { clearTimeout(maxTimerRef.current); maxTimerRef.current = null; }
   }
 
+  function updateVocab(term, correct) {
+    setVocab((prev) => {
+      const v = { ...prev };
+      const entry = v[term] || {
+        term,
+        type: "word",
+        seenCount: 0,
+        correctCount: 0,
+        mastery: 0,
+        lastSeenAt: 0,
+        nextReviewAt: 0,
+      };
+      entry.seenCount += 1;
+      if (correct) {
+        entry.correctCount += 1;
+        entry.mastery = Math.min(entry.mastery + 1, 5);
+        const schedule = [1, 3, 7, 14, 30];
+        const days = schedule[Math.min(entry.mastery - 1, 4)] || 1;
+        entry.nextReviewAt = Date.now() + days * 86400000;
+      } else {
+        entry.mastery = Math.max(entry.mastery - 1, 0);
+        entry.nextReviewAt = Date.now() + 60 * 60 * 1000;
+      }
+      entry.lastSeenAt = Date.now();
+      v[term] = entry;
+      if (import.meta.env.VITE_USE_FIREBASE) {
+        (async () => {
+          const u = await ensureAuth();
+          if (u) await setDoc(doc(db, `users/${u.uid}/vocab/${term}`), entry);
+        })();
+      }
+      return v;
+    });
+  }
+
   /** ---------- MATCH / NAV ---------- **/
   function nextPrompt() {
     if (!matchOk) return alert("Try saying it again, then try again.");
+    const term = prompts[idx];
+    updateVocab(term, true);
     if (idx < prompts.length - 1) {
       setHeard("");
       setShowThai(false);
@@ -443,6 +501,8 @@ export default function App() {
 
   async function markSessionComplete() {
     if (!matchOk) return alert("Say the last prompt correctly first, then Finish.");
+    const term = prompts[idx];
+    updateVocab(term, true);
 
     // --- streak bookkeeping ---
     const today = todayISO();
@@ -490,12 +550,10 @@ export default function App() {
     setProgress(updated);
 
     // Ask the server for a fresh lesson (avoid repeating the current words)
-    const review_from = Array.isArray(prompts) ? prompts.slice(0, 8) : [];
     await fetchNewLesson({
       level: updated.level,
-      theme: "market",  // you can rotate this later
+      topic: "market", // rotate later
       count: nextCount,
-      review_from
     });
 
     // reset and go home
@@ -550,12 +608,13 @@ export default function App() {
                 <button className="btn btn-primary" onClick={() => setView("practice")}>Continue practice</button>
                 <button
                   className={`btn ${lessonLoading ? "btn-disabled" : "btn-secondary"}`}
-                  onClick={() => fetchNewLesson({ level: progress.level || "A1", theme: "cooking", count: 6, review_from: prompts })}
+                  onClick={() => fetchNewLesson({ level: progress.level || "A1", topic: "cooking", count: 6 })}
                   disabled={lessonLoading}
                 >
                   {lessonLoading ? "Loading…" : "New lesson"}
                 </button>
               </div>
+              {genStatus && <p className="text-sm text-warning mt-2">{genStatus}</p>}
             </div>
           </div>
 
@@ -627,6 +686,8 @@ export default function App() {
             <button
               className="btn btn-secondary"
               onClick={() => {
+                const term = prompts[idx];
+                updateVocab(term, false);
                 setHeard("");
                 setShowThai(false);
                 setIdx((i) => (i + 1) % prompts.length);

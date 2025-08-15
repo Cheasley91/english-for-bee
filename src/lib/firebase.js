@@ -17,7 +17,11 @@ const app = getApps().length ? getApps()[0] : initializeApp(firebaseConfig);
 
 export const db = getFirestore(app);
 export const auth = getAuth(app);
-export const analytics = getAnalytics(app);
+let analytics = null;
+if (typeof window !== "undefined" && import.meta.env.VITE_FB_MEASUREMENT_ID) {
+  analytics = getAnalytics(app);
+}
+export { analytics };
 
 export async function ensureAuth() {
   if (!import.meta.env.VITE_USE_FIREBASE) return null;

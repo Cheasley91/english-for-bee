@@ -1,3 +1,5 @@
+/* eslint-env node */
+/* global process, Buffer */
 // api/tts.js — Vercel serverless function (Node)
 // Uses OpenAI TTS to synthesize speech and streams back audio/mpeg.
 

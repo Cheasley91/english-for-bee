@@ -1,3 +1,6 @@
+/* eslint-env node */
+/* global process, Buffer */
+
 export default async function handler(req, res) {
   try {
     const { target, heard } = await readJSON(req);
@@ -26,7 +29,7 @@ export default async function handler(req, res) {
     if (!r.ok) return res.status(500).json({ error: await r.text() });
     const data = await r.json();
     let out = {};
-    try { out = JSON.parse(data.choices[0].message.content); } catch {}
+    try { out = JSON.parse(data.choices[0].message.content); } catch { /* ignore */ }
     res.status(200).json({
       score: out.score ?? 0,
       verdict: out.verdict || "incorrect",
