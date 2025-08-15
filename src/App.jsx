@@ -72,6 +72,42 @@ function saveVocab(v) {
 }
 function todayISO() { return new Date().toISOString().slice(0, 10); }
 
+// --- BEGIN: lesson shape shim (temporary) ---
+function coerceLessonShape(apiData) {
+  // Always return an object with: { title, items: [...], fingerprint? }
+  let lesson = apiData?.lesson ?? {};
+
+  // If server returned a single big blob in lesson.raw, extract vocab lines
+  if (!lesson.items || !Array.isArray(lesson.items) || lesson.items.length === 0) {
+    const raw = String(lesson.raw || "");
+    const lines = raw.split(/\r?\n/);
+
+    const candidates = [];
+    for (const ln of lines) {
+      // Grab lines like "1. Apple" or "Apple"
+      const m = ln.match(/^\s*(?:\d+[).\s-]+)?([A-Za-z][A-Za-z\s'’-]{1,30})\s*$/);
+      if (m) candidates.push(m[1].trim());
+    }
+
+    // Unique, lowercased, first 10
+    const unique = [...new Set(candidates.map(w => w.toLowerCase()))].slice(0, 10);
+
+    if (unique.length > 0) {
+      lesson.items = unique.map(term => ({ type: "word", term }));
+    }
+  }
+
+  // Fallback so UI never renders blanks
+  if (!lesson.items || lesson.items.length === 0) {
+    const fallback = ["apple", "banana", "rice", "chicken", "fish", "bread"];
+    lesson.items = fallback.map(term => ({ type: "word", term }));
+  }
+
+  if (!lesson.title) lesson.title = "Lesson";
+  return lesson;
+}
+// --- END: lesson shape shim (temporary) ---
+
 /** ---------- HELPERS (pure functions) ---------- **/
 function norm(s) {
   return (s || "").toLowerCase().trim().replace(/[^a-z ]/g, "");
@@ -240,7 +276,7 @@ export default function App() {
         });
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
-        const lesson = data?.lesson;
+        const lesson = coerceLessonShape(data);
         const fp = lessonFingerprint(lesson);
         if (knownHashes.has(fp)) {
           attempt++;
