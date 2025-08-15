@@ -45,10 +45,10 @@ export async function upgradeAnonToEmail(email, password) {
   return linkWithCredential(user, cred);
 }
 
-export async function signInEmail(email, password) {
-  try {
-    return await signInWithEmailAndPassword(auth, email, password);
-  } catch {
-    return await createUserWithEmailAndPassword(auth, email, password);
-  }
+export async function loginEmail(email, password) {
+  return signInWithEmailAndPassword(auth, email, password);
+}
+
+export async function registerEmail(email, password) {
+  return createUserWithEmailAndPassword(auth, email, password);
 }

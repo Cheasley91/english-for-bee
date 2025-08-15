@@ -10,6 +10,7 @@ A lightweight English‑practice web app tailored for Thai speakers.
 - Tracks progress locally or in Firestore (anonymous by default; email/password upgrade keeps data)
 - Thai translations for lesson items (best effort)
 - Daily rotating tip on home and lesson screens
+- Login and registration screens with optional guest access
 
 ## Quick Start (Codespaces or local Node 20+)
 
@@ -36,7 +37,7 @@ Set the following environment variable in **Project → Settings → Environment
 
 ### Firebase (optional)
 
-Set `VITE_USE_FIREBASE=true` and the `VITE_FB_*` config values to enable Firestore persistence. Users start anonymously; calling `signInEmail(email, password)` signs in or creates an account, and `upgradeAnonToEmail(email, password)` links the anonymous user so progress and lessons stay under the same UID.
+Set `VITE_USE_FIREBASE=true` and the `VITE_FB_*` config values to enable Firestore persistence. Users start anonymously; the login screen calls `loginEmail(email, password)` to sign in, and the registration screen uses `upgradeAnonToEmail(email, password)` to link the anonymous user so progress and lessons stay under the same UID.
 
 ### Daily Tips
 

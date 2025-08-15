@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { collection, doc, getDocs, setDoc } from "firebase/firestore";
-import { db, ensureAuth } from "./lib/firebase";
+import { auth, db, ensureAuth, loginEmail, upgradeAnonToEmail } from "./lib/firebase";
 import {
   MAX_GENERATION_RETRIES,
   lessonFingerprint,
@@ -14,17 +14,6 @@ import {
 } from "./lib/storage";
 import { backfillThai } from "./lib/thai-dict";
 import { tipOfTheDay } from "./lib/tips";
-
-/** ---------- CONFIG (initial defaults only) ---------- **/
-const PROMPTS_DEFAULT = ["boat", "vegetable", "very", "west", "apple", "an egg", "the market"];
-const THAI_DEFAULT = {
-  "vegetable": "ผัก",
-  "very": "มาก",
-  "west": "ตะวันตก",
-  "apple": "แอปเปิล",
-  "an egg": "ไข่หนึ่งฟอง",
-  "the market": "ตลาด",
-};
 // Valid OpenAI TTS voices for `tts-1`
 const VALID_VOICES = ["alloy", "ash", "ballad", "coral", "echo", "fable", "onyx", "nova", "sage", "shimmer", "verse"];
 const DEFAULT_VOICE = "alloy";
@@ -97,7 +86,7 @@ function coerceLessonShape(apiData) {
 
   // Fallback so UI never renders blanks
   if (!lesson.items || lesson.items.length === 0) {
-    const fallback = ["apple", "banana", "rice", "chicken", "fish", "bread"];
+    const fallback = ["hello", "goodbye", "please", "thank you", "bus", "market"];
     lesson.items = fallback.map(term => ({ type: "word", term }));
   }
 
@@ -125,7 +114,7 @@ function rootMeanSquare(buf) {
 /** ---------- MAIN APP ---------- **/
 export default function App() {
   // routing
-  const [view, setView] = useState("home");
+  const [view, setView] = useState("login");
 
   // progress
   const [progress, setProgress] = useState(DEFAULT_PROGRESS);
@@ -149,8 +138,11 @@ export default function App() {
   }, []);
 
   // dynamic lesson state (replaces hard-coded lists at runtime)
-  const [prompts, setPrompts] = useState(PROMPTS_DEFAULT); // English words/phrases
-  const [thaiMap, setThaiMap] = useState(THAI_DEFAULT);    // { en: th }
+  const [prompts, setPrompts] = useState([]); // English words/phrases
+  const [thaiMap, setThaiMap] = useState({}); // { en: th }
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [authError, setAuthError] = useState("");
   const [lessonLoading, setLessonLoading] = useState(false);
   const [genStatus, setGenStatus] = useState("");
 
@@ -216,6 +208,39 @@ export default function App() {
     })();
   }, []);
 
+  useEffect(() => {
+    if (auth.currentUser && !auth.currentUser.isAnonymous) {
+      setView("home");
+      fetchNewLesson({ level: progress.level || "A1", topic: "daily life", count: 6 });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function handleLogin() {
+    try {
+      await loginEmail(email, password);
+      setView("home");
+      await fetchNewLesson({ level: progress.level || "A1", topic: "daily life", count: 6 });
+    } catch (e) {
+      setAuthError(e.message);
+    }
+  }
+
+  async function handleRegister() {
+    try {
+      await upgradeAnonToEmail(email, password);
+      setView("home");
+      await fetchNewLesson({ level: progress.level || "A1", topic: "daily life", count: 6 });
+    } catch (e) {
+      setAuthError(e.message);
+    }
+  }
+
+  async function handleGuest() {
+    setView("home");
+    await fetchNewLesson({ level: progress.level || "A1", topic: "daily life", count: 6 });
+  }
+
   /** ---------- TTS (OpenAI via /api/tts) with fallback ---------- **/
   async function fetchTTS(text, v) {
     const url = `/api/tts?text=${encodeURIComponent(text)}&voice=${encodeURIComponent(v)}`;
@@ -251,10 +276,10 @@ export default function App() {
   }
 
   /** ---------- Fetch a NEW LESSON from /api/new-lesson ---------- **/
-  async function fetchNewLesson({ level = "A1", topic = "market", count = 6 } = {}) {
+  async function fetchNewLesson({ level = "A1", topic = "daily life", count = 6 } = {}) {
     setLessonLoading(true);
     setGenStatus("");
-    const topics = ["market", "travel", "food", "home", "work"];
+    const topics = ["daily life", "travel", "food", "home", "work", "shopping"];
     const now = Date.now();
     const dueTerms = Object.values(vocab)
       .filter((v) => v.nextReviewAt && v.nextReviewAt <= now)
@@ -591,7 +616,7 @@ export default function App() {
     // Ask the server for a fresh lesson (avoid repeating the current words)
     await fetchNewLesson({
       level: updated.level,
-      topic: "market", // rotate later
+      topic: "daily life",
       count: nextCount,
     });
 
@@ -604,38 +629,91 @@ export default function App() {
   return (
     <div className="min-h-screen bg-base-200 p-0 sm:p-6">
       {/* Navbar */}
-      <div className="navbar bg-base-100 rounded-none sm:rounded-box shadow mb-6">
-        <div className="flex-1 px-2 text-xl font-bold">🐝 English for Bee</div>
-        <div className="flex-none flex items-center gap-2">
-          <label className="label cursor-pointer gap-2">
-            <span className="label-text">Voice</span>
-            <select
-              className="select select-sm select-bordered"
-              value={voice}
-              onChange={(e) => setVoice(e.target.value)}
-              title="Voice"
-            >
-              {VALID_VOICES.map(v => (
-                <option key={v} value={v}>
-                  {v.charAt(0).toUpperCase() + v.slice(1)}
-                </option>
-              ))}
-            </select>
-          </label>
+      {view !== "login" && view !== "register" && (
+        <div className="navbar bg-base-100 rounded-none sm:rounded-box shadow mb-6">
+          <div className="flex-1 px-2 text-xl font-bold">🐝 English for Bee</div>
+          <div className="flex-none flex items-center gap-2">
+            <label className="label cursor-pointer gap-2">
+              <span className="label-text">Voice</span>
+              <select
+                className="select select-sm select-bordered"
+                value={voice}
+                onChange={(e) => setVoice(e.target.value)}
+                title="Voice"
+              >
+                {VALID_VOICES.map(v => (
+                  <option key={v} value={v}>
+                    {v.charAt(0).toUpperCase() + v.slice(1)}
+                  </option>
+                ))}
+              </select>
+            </label>
 
-          <button className={`btn btn-ghost ${view === "home" ? "btn-active" : ""}`} onClick={() => setView("home")}>
-            Home
-          </button>
-          <button
-            className={`btn btn-ghost ${view === "practice" ? "btn-active" : ""}`}
-            onClick={() => { resetPractice(); setView("practice"); }}
-          >
-            Practice
-          </button>
+            <button className={`btn btn-ghost ${view === "home" ? "btn-active" : ""}`} onClick={() => setView("home")}>
+              Home
+            </button>
+            <button
+              className={`btn btn-ghost ${view === "practice" ? "btn-active" : ""}`}
+              onClick={() => { resetPractice(); setView("practice"); }}
+            >
+              Practice
+            </button>
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Views */}
+      {view === "login" && (
+        <div className="card bg-base-100 w-full max-w-sm mx-auto shadow p-6">
+          <h2 className="text-2xl font-bold mb-2">Sign in</h2>
+          <input
+            type="email"
+            placeholder="Email"
+            className="input input-bordered w-full mb-2"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+          />
+          <input
+            type="password"
+            placeholder="Password"
+            className="input input-bordered w-full mb-2"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
+          {authError && <p className="text-error text-sm mb-2">{authError}</p>}
+          <div className="flex flex-col gap-2">
+            <button className="btn btn-primary" onClick={handleLogin}>Login</button>
+            <button className="btn" onClick={() => { setAuthError(""); setView("register"); }}>Register</button>
+            <button className="btn btn-ghost" onClick={handleGuest}>Continue as guest</button>
+          </div>
+        </div>
+      )}
+
+      {view === "register" && (
+        <div className="card bg-base-100 w-full max-w-sm mx-auto shadow p-6">
+          <h2 className="text-2xl font-bold mb-2">Register</h2>
+          <input
+            type="email"
+            placeholder="Email"
+            className="input input-bordered w-full mb-2"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+          />
+          <input
+            type="password"
+            placeholder="Password"
+            className="input input-bordered w-full mb-2"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
+          {authError && <p className="text-error text-sm mb-2">{authError}</p>}
+          <div className="flex flex-col gap-2">
+            <button className="btn btn-primary" onClick={handleRegister}>Create account</button>
+            <button className="btn" onClick={() => { setAuthError(""); setView("login"); }}>Back to login</button>
+          </div>
+        </div>
+      )}
+
       {view === "home" && (
         <div className="w-full">
           {/* Hero */}
@@ -647,7 +725,7 @@ export default function App() {
                 <button className="btn btn-primary" onClick={() => setView("practice")}>Continue practice</button>
                 <button
                   className={`btn ${lessonLoading ? "btn-disabled" : "btn-secondary"}`}
-                  onClick={() => fetchNewLesson({ level: progress.level || "A1", topic: "cooking", count: 6 })}
+                  onClick={() => fetchNewLesson({ level: progress.level || "A1", topic: "daily life", count: 6 })}
                   disabled={lessonLoading}
                 >
                   {lessonLoading ? "Loading…" : "New lesson"}

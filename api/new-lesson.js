@@ -65,7 +65,7 @@ function parseItems(arr) {
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
   try {
-    const { level = "beginner", count = 8, topic = "general", avoidTerms = [] } = req.body ?? {};
+    const { level = "beginner", count = 8, topic = "daily life", avoidTerms = [] } = req.body ?? {};
     if (!process.env.OPENAI_API_KEY) {
       return res.status(500).json({ error: "Missing OPENAI_API_KEY" });
     }
