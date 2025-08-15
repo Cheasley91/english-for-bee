@@ -1,19 +1,22 @@
 import React, { useEffect, useRef, useState } from "react";
 import { collection, doc, getDocs, setDoc } from "firebase/firestore";
-import { auth, db, ensureAuth, loginEmail, upgradeAnonToEmail } from "./lib/firebase";
+import { onAuthStateChanged } from "firebase/auth";
+import { auth, db, ensureAuth, loginEmail, registerEmail, logout } from "./lib/firebase";
 import {
   MAX_GENERATION_RETRIES,
   lessonFingerprint,
   loadHashes,
-  saveHash,
-  loadProgress,
-  saveProgress,
+  saveLesson,
+  finishLessonAndAward,
+  loadProfile,
   upsertVocab,
   translateToThaiBulk,
   UNIQUENESS_ENABLED,
 } from "./lib/storage";
 import { backfillThai } from "./lib/thai-dict";
 import { tipOfTheDay } from "./lib/tips";
+import Lessons from "./pages/Lessons";
+import { computeLevel } from "./lib/progress";
 // Valid OpenAI TTS voices for `tts-1`
 const VALID_VOICES = ["alloy", "ash", "ballad", "coral", "echo", "fable", "onyx", "nova", "sage", "shimmer", "verse"];
 const DEFAULT_VOICE = "alloy";
@@ -28,14 +31,12 @@ const VAD = {
   hpHz: 120,       // high-pass cutoff
 };
 
-const DEFAULT_PROGRESS = {
+const DEFAULT_PROFILE = {
   xp: 0,
+  level: 1,
+  streakCount: 0,
+  lastActiveDate: null,
   lessonsCompleted: 0,
-  streak: 0,
-  lastDate: null,
-  level: "A1",
-  recentScores: [],
-  troubleWords: [],
 };
 
 /** ---------- PERSISTENCE ---------- **/
@@ -56,7 +57,6 @@ function saveVocab(v) {
     /* ignore */
   }
 }
-function todayISO() { return new Date().toISOString().slice(0, 10); }
 
 // --- BEGIN: lesson shape shim (temporary) ---
 function coerceLessonShape(apiData) {
@@ -99,12 +99,6 @@ function coerceLessonShape(apiData) {
 function norm(s) {
   return (s || "").toLowerCase().trim().replace(/[^a-z ]/g, "");
 }
-function dayDiff(iso1, iso2) {
-  if (!iso1 || !iso2) return Infinity;
-  const d1 = new Date(iso1 + "T00:00:00Z");
-  const d2 = new Date(iso2 + "T00:00:00Z");
-  return Math.round((d2 - d1) / 86400000);
-}
 function rootMeanSquare(buf) {
   let sum = 0;
   for (let i = 0; i < buf.length; i++) { const v = buf[i]; sum += v * v; }
@@ -116,26 +110,18 @@ export default function App() {
   // routing
   const [view, setView] = useState("login");
 
-  // progress
-  const [progress, setProgress] = useState(DEFAULT_PROGRESS);
-  useEffect(() => {
-    (async () => {
-      const p = await loadProgress(DEFAULT_PROGRESS);
-      setProgress(p);
-    })();
-  }, []);
+  // profile progress
+  const [profile, setProfile] = useState(DEFAULT_PROFILE);
 
   // spaced vocab stats
   const [vocab, setVocab] = useState(loadVocab);
 
+  const [currentLesson, setCurrentLesson] = useState(null);
+
+  const levelInfo = computeLevel(profile.xp || 0);
+
   // known lesson hashes
   const [knownHashes, setKnownHashes] = useState(new Set());
-  useEffect(() => {
-    (async () => {
-      const set = await loadHashes();
-      setKnownHashes(set);
-    })();
-  }, []);
 
   // dynamic lesson state (replaces hard-coded lists at runtime)
   const [prompts, setPrompts] = useState([]); // English words/phrases
@@ -187,40 +173,38 @@ export default function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => () => stopAll(true), []);
 
-  // persist progress
-  useEffect(() => {
-    saveProgress(progress);
-  }, [progress]);
-
   // persist vocab
   useEffect(() => saveVocab(vocab), [vocab]);
 
-  // initial Firebase load
   useEffect(() => {
     if (!import.meta.env.VITE_USE_FIREBASE) return;
-    (async () => {
-      const u = await ensureAuth();
-      if (!u) return;
-      const vSnap = await getDocs(collection(db, `users/${u.uid}/vocab`));
-      const vv = {};
-      vSnap.forEach((d) => (vv[d.id] = d.data()));
-      if (Object.keys(vv).length) setVocab(vv);
-    })();
-  }, []);
-
-  useEffect(() => {
-    if (auth.currentUser && !auth.currentUser.isAnonymous) {
-      setView("home");
-      fetchNewLesson({ level: progress.level || "A1", topic: "daily life", count: 6 });
-    }
+    const unsub = onAuthStateChanged(auth, async (u) => {
+      if (u) {
+        const p = await loadProfile({ db, uid: u.uid, defaults: DEFAULT_PROFILE });
+        setProfile(p);
+        const vSnap = await getDocs(collection(db, `users/${u.uid}/vocab`));
+        const vv = {};
+        vSnap.forEach((d) => (vv[d.id] = d.data()));
+        if (Object.keys(vv).length) setVocab(vv);
+        const hashes = await loadHashes();
+        setKnownHashes(hashes);
+        await fetchNewLesson({ level: "A1", topic: "daily life", count: 6 });
+        setView("home");
+      } else {
+        setProfile(DEFAULT_PROFILE);
+        setVocab(loadVocab());
+        setKnownHashes(new Set());
+        setCurrentLesson(null);
+        setView("login");
+      }
+    });
+    return () => unsub();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   async function handleLogin() {
     try {
       await loginEmail(email, password);
-      setView("home");
-      await fetchNewLesson({ level: progress.level || "A1", topic: "daily life", count: 6 });
     } catch (e) {
       setAuthError(e.message);
     }
@@ -228,17 +212,20 @@ export default function App() {
 
   async function handleRegister() {
     try {
-      await upgradeAnonToEmail(email, password);
-      setView("home");
-      await fetchNewLesson({ level: progress.level || "A1", topic: "daily life", count: 6 });
+      await registerEmail(email, password);
     } catch (e) {
       setAuthError(e.message);
     }
   }
 
-  async function handleGuest() {
-    setView("home");
-    await fetchNewLesson({ level: progress.level || "A1", topic: "daily life", count: 6 });
+  async function handleLogout() {
+    try {
+      await logout();
+    } catch {
+      /* ignore */
+    }
+    localStorage.clear();
+    resetPractice();
   }
 
   /** ---------- TTS (OpenAI via /api/tts) with fallback ---------- **/
@@ -322,24 +309,11 @@ export default function App() {
       return false;
     }
 
-    await saveHash(lesson.fingerprint);
-    knownHashes.add(lesson.fingerprint);
-    setKnownHashes(new Set(knownHashes));
-
-    if (import.meta.env.VITE_USE_FIREBASE) {
-      const u = await ensureAuth();
-      if (u) {
-        const lessonId = Date.now().toString();
-        await setDoc(doc(db, `users/${u.uid}/lessons/${lessonId}`), {
-          createdAt: Date.now(),
-          title: lesson.title,
-          items: lesson.items,
-          fingerprint: lesson.fingerprint,
-        });
-      }
-    } else {
-      localStorage.setItem("efb_last_lesson_json", JSON.stringify(lesson));
-    }
+    const u = await ensureAuth().catch(() => null);
+    const uid = u?.uid || "local";
+    const lessonId = await saveLesson({ ...lesson, source: "api" }, { db, uid });
+    lesson.id = lessonId;
+    setCurrentLesson(lesson);
 
     let nextPrompts = Array.isArray(lesson?.items)
       ? lesson.items.filter((i) => i.type !== "text" && i.term).map((i) => i.term)
@@ -359,6 +333,24 @@ export default function App() {
     setLessonLoading(false);
     setGenStatus("");
     return true;
+  }
+
+  async function handleRepeat(lesson) {
+    const nextPrompts = Array.isArray(lesson.items)
+      ? lesson.items.filter((i) => i.type !== "text" && i.term).map((i) => i.term)
+      : [];
+    const baseThai = {};
+    lesson.items.forEach((i) => {
+      if (i.type !== "text" && i.term) baseThai[i.term] = i.thai || "";
+    });
+    const bulk = translateToThaiBulk(nextPrompts);
+    setPrompts(nextPrompts);
+    setThaiMap({ ...bulk, ...baseThai });
+    setIdx(0);
+    setHeard("");
+    setShowThai(false);
+    setCurrentLesson({ ...lesson, isRepeat: true });
+    setView("practice");
   }
 
   /** ---------- RECORDING / TRANSCRIBE ---------- **/
@@ -568,59 +560,18 @@ export default function App() {
     const term = prompts[idx];
     updateVocab(term, true);
 
-    // --- streak bookkeeping ---
-    const today = todayISO();
-    const prev = progress.lastDate;
-    let newStreak = progress.streak || 0;
-    if (prev === today) {
-      newStreak = progress.streak || 1;
-    } else {
-      const diffDays = dayDiff(prev, today);
-      newStreak = prev ? (diffDays === 1 ? (progress.streak || 0) + 1 : 1) : 1;
+    const u = await ensureAuth().catch(() => null);
+    const uid = u?.uid || "local";
+    if (currentLesson) {
+      await finishLessonAndAward(currentLesson, { db, uid, USE_FIREBASE: import.meta.env.VITE_USE_FIREBASE });
+      const p = await loadProfile({ db, uid, defaults: DEFAULT_PROFILE });
+      setProfile(p);
+      knownHashes.add(currentLesson.fingerprint);
+      setKnownHashes(new Set(knownHashes));
     }
 
-    // --- simple session score (for now finishing = success) ---
-    const sessionScore = 1.0;
-    const recentScores = Array.isArray(progress.recentScores) ? [...progress.recentScores] : [];
-    recentScores.push(sessionScore);
-    while (recentScores.length > 5) recentScores.shift(); // keep last 5
+    await fetchNewLesson({ level: "A1", topic: "daily life", count: 6 });
 
-    // --- decide next level & how many new items ---
-    const order = ["A0", "A1", "A2", "B1", "B2"];
-    const currentLevel = progress.level || "A1";
-    const levelIdx = Math.max(0, order.indexOf(currentLevel));
-
-    const last3 = recentScores.slice(-3);
-    const avg = last3.length ? (last3.reduce((a, b) => a + b, 0) / last3.length) : 0;
-
-    let nextLevel = currentLevel;
-    if (avg >= 0.85 && levelIdx < order.length - 1) nextLevel = order[levelIdx + 1];
-    if (avg > 0 && avg <= 0.5 && levelIdx > 0) nextLevel = order[levelIdx - 1];
-
-    const countByLevel = { A0: 6, A1: 6, A2: 8, B1: 10, B2: 10 };
-    const nextCount = countByLevel[nextLevel] || 6;
-
-    // --- progress object we save ---
-    const updated = {
-      ...progress,
-      xp: (progress.xp || 0) + 50,
-      lessonsCompleted: (progress.lessonsCompleted || 0) + 1,
-      streak: newStreak,
-      lastDate: today,
-      level: nextLevel,
-      recentScores,
-      troubleWords: progress.troubleWords || [],
-    };
-    setProgress(updated);
-
-    // Ask the server for a fresh lesson (avoid repeating the current words)
-    await fetchNewLesson({
-      level: updated.level,
-      topic: "daily life",
-      count: nextCount,
-    });
-
-    // reset and go home
     resetPractice();
     setView("home");
   }
@@ -658,6 +609,13 @@ export default function App() {
             >
               Practice
             </button>
+            <button
+              className={`btn btn-ghost ${view === "lessons" ? "btn-active" : ""}`}
+              onClick={() => setView("lessons")}
+            >
+              Lessons
+            </button>
+            <button className="btn btn-ghost" onClick={handleLogout}>Logout</button>
           </div>
         </div>
       )}
@@ -684,7 +642,6 @@ export default function App() {
           <div className="flex flex-col gap-2">
             <button className="btn btn-primary" onClick={handleLogin}>Login</button>
             <button className="btn" onClick={() => { setAuthError(""); setView("register"); }}>Register</button>
-            <button className="btn btn-ghost" onClick={handleGuest}>Continue as guest</button>
           </div>
         </div>
       )}
@@ -725,7 +682,7 @@ export default function App() {
                 <button className="btn btn-primary" onClick={() => setView("practice")}>Continue practice</button>
                 <button
                   className={`btn ${lessonLoading ? "btn-disabled" : "btn-secondary"}`}
-                  onClick={() => fetchNewLesson({ level: progress.level || "A1", topic: "daily life", count: 6 })}
+                  onClick={() => fetchNewLesson({ level: "A1", topic: "daily life", count: 6 })}
                   disabled={lessonLoading}
                 >
                   {lessonLoading ? "Loading…" : "New lesson"}
@@ -738,17 +695,20 @@ export default function App() {
           {/* Stats */}
           <div className="stats shadow w-full mb-4">
             <div className="stat">
-              <div className="stat-title">XP</div>
-              <div className="stat-value">{progress.xp || 0}</div>
-              <div className="stat-desc">+50 per finished session</div>
+              <div className="stat-title">Level</div>
+              <div className="stat-value">{profile.level || 1}</div>
+              <div className="stat-desc">
+                <progress className="progress w-32" value={levelInfo.xpIntoLevel} max={levelInfo.xpToNext}></progress>
+              </div>
             </div>
             <div className="stat">
-              <div className="stat-title">Lessons Completed</div>
-              <div className="stat-value">{progress.lessonsCompleted || 0}</div>
+              <div className="stat-title">XP</div>
+              <div className="stat-value">{profile.xp || 0}</div>
+              <div className="stat-desc">XP is awarded when you complete a new lesson.</div>
             </div>
             <div className="stat">
               <div className="stat-title">Streak</div>
-              <div className="stat-value">{progress.streak || 0} 🔥</div>
+              <div className="stat-value">{profile.streakCount || 0} 🔥</div>
               <div className="stat-desc">days in a row</div>
             </div>
           </div>
@@ -759,6 +719,10 @@ export default function App() {
             <p className="text-sm text-base-content/70">{tip}</p>
           </div>
         </div>
+      )}
+
+      {view === "lessons" && (
+        <Lessons onRepeat={handleRepeat} />
       )}
 
       {view === "practice" && (

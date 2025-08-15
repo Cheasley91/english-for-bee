@@ -1,11 +1,11 @@
 import { initializeApp, getApps } from "firebase/app";
 import {
   getAuth,
-  signInAnonymously,
-  EmailAuthProvider,
-  linkWithCredential,
+  setPersistence,
+  browserLocalPersistence,
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
+  signOut,
 } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
 import { getAnalytics } from "firebase/analytics";
@@ -24,6 +24,9 @@ const app = getApps().length ? getApps()[0] : initializeApp(firebaseConfig);
 
 export const db = getFirestore(app);
 export const auth = getAuth(app);
+if (typeof window !== "undefined") {
+  setPersistence(auth, browserLocalPersistence);
+}
 let analytics = null;
 if (typeof window !== "undefined" && import.meta.env.VITE_FB_MEASUREMENT_ID) {
   analytics = getAnalytics(app);
@@ -32,17 +35,7 @@ export { analytics };
 
 export async function ensureAuth() {
   if (!import.meta.env.VITE_USE_FIREBASE) return null;
-  const u = auth.currentUser;
-  if (u) return u;
-  await signInAnonymously(auth);
   return auth.currentUser;
-}
-
-export async function upgradeAnonToEmail(email, password) {
-  const user = auth.currentUser;
-  if (!user) throw new Error("No current user");
-  const cred = EmailAuthProvider.credential(email, password);
-  return linkWithCredential(user, cred);
 }
 
 export async function loginEmail(email, password) {
@@ -51,4 +44,8 @@ export async function loginEmail(email, password) {
 
 export async function registerEmail(email, password) {
   return createUserWithEmailAndPassword(auth, email, password);
+}
+
+export async function logout() {
+  return signOut(auth);
 }

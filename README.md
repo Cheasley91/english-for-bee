@@ -7,10 +7,18 @@ A lightweight English‑practice web app tailored for Thai speakers.
 - Mobile‑first UI (Tailwind + DaisyUI via CDN)
 - Text‑to‑Speech voice picker (Web Speech API)
 - Microphone practice via **Whisper** (serverless `/api/transcribe`)
-- Tracks progress locally or in Firestore (anonymous by default; email/password upgrade keeps data)
+- Tracks progress locally or in Firestore under a logged-in user account
 - Thai translations for lesson items (best effort)
 - Daily rotating tip on home and lesson screens
-- Login and registration screens with optional guest access
+- Login and registration screens (no guest mode)
+
+### Lessons & Progress
+
+- Completed lessons are stored per user (Firestore or local storage).
+- The **Lessons** tab lists prior lessons with a Repeat button to practice again.
+- XP is awarded only on the first completion of a lesson; repeats give no XP.
+- Level increases with total XP using a superlinear curve (100, 150, 225, ...).
+- Daily streak counts consecutive days with a completed lesson (America/New_York timezone).
 
 ## Quick Start (Codespaces or local Node 20+)
 
@@ -37,7 +45,7 @@ Set the following environment variable in **Project → Settings → Environment
 
 ### Firebase (optional)
 
-Set `VITE_USE_FIREBASE=true` and the `VITE_FB_*` config values to enable Firestore persistence. Users start anonymously; the login screen calls `loginEmail(email, password)` to sign in, and the registration screen uses `upgradeAnonToEmail(email, password)` to link the anonymous user so progress and lessons stay under the same UID.
+Set `VITE_USE_FIREBASE=true` and the `VITE_FB_*` config values to enable Firestore persistence. Authentication uses email/password and sessions persist via `browserLocalPersistence`.
 
 ### Daily Tips
 
