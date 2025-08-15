@@ -23,6 +23,7 @@ const THAI_DEFAULT = {
 // Valid OpenAI TTS voices for `tts-1`
 const VALID_VOICES = ["alloy", "ash", "ballad", "coral", "echo", "fable", "onyx", "nova", "sage", "shimmer", "verse"];
 const DEFAULT_VOICE = "alloy";
+const UNIQUENESS_ENABLED = false; // TEMP: must not block lesson creation
 
 // Silence/VAD settings
 const VAD = {
@@ -71,6 +72,43 @@ function saveVocab(v) {
   }
 }
 function todayISO() { return new Date().toISOString().slice(0, 10); }
+
+// --- BEGIN: lesson shape shim (temporary) ---
+function coerceLessonShape(apiData) {
+  // Always return an object with: { title, items: [...], fingerprint? }
+  let lesson = apiData?.lesson ?? {};
+
+  // If server returned a single big blob in lesson.raw, extract vocab lines
+  if (!lesson.items || !Array.isArray(lesson.items) || lesson.items.length === 0) {
+    const raw = String(lesson.raw || "");
+    const lines = raw.split(/\r?\n/);
+
+    const candidates = [];
+    for (const ln of lines) {
+      // Grab lines like "1. Apple" or "Apple"
+      const m = ln.match(/^\s*(?:\d+[).\s-]+)?([A-Za-z][A-Za-z\s'’-]{1,30})\s*$/);
+      if (m) candidates.push(m[1].trim());
+    }
+
+    // Unique, lowercased, first 10
+    const unique = [...new Set(candidates.map(w => w.toLowerCase()))].slice(0, 10);
+
+    if (unique.length > 0) {
+      lesson.items = unique.map(term => ({ type: "word", term }));
+      console.info("coerced items:", lesson.items);
+    }
+  }
+
+  // Fallback so UI never renders blanks
+  if (!lesson.items || lesson.items.length === 0) {
+    const fallback = ["apple", "banana", "rice", "chicken", "fish", "bread"];
+    lesson.items = fallback.map(term => ({ type: "word", term }));
+  }
+
+  if (!lesson.title) lesson.title = "Lesson";
+  return lesson;
+}
+// --- END: lesson shape shim (temporary) ---
 
 /** ---------- HELPERS (pure functions) ---------- **/
 function norm(s) {
@@ -189,6 +227,7 @@ export default function App() {
     return await resp.blob(); // audio/mpeg
   }
   async function speak(text) {
+    if (!text) return;
     try {
       setTtsBusy(true);
       let blob;
@@ -240,21 +279,23 @@ export default function App() {
         });
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
-        const lesson = data?.lesson;
-        const fp = lessonFingerprint(lesson);
-        if (knownHashes.has(fp)) {
-          attempt++;
-          setGenStatus("duplicate—trying again…");
-          continue;
-        }
-        knownHashes.add(fp);
-        setKnownHashes(new Set(knownHashes));
-        if (import.meta.env.VITE_USE_FIREBASE) {
-          const u = await ensureAuth();
-          if (u) await setDoc(doc(db, `users/${u.uid}/hashes/${fp}`), { createdAt: Date.now() });
+        const lesson = coerceLessonShape(data);
+        if (UNIQUENESS_ENABLED) {
+          const fp = lessonFingerprint(lesson);
+          if (knownHashes.has(fp)) {
+            attempt++;
+            setGenStatus("duplicate—trying again…");
+            continue;
+          }
+          knownHashes.add(fp);
+          setKnownHashes(new Set(knownHashes));
+          if (import.meta.env.VITE_USE_FIREBASE) {
+            const u = await ensureAuth();
+            if (u) await setDoc(doc(db, `users/${u.uid}/hashes/${fp}`), { createdAt: Date.now() });
+          }
         }
         let nextPrompts = Array.isArray(lesson?.items)
-          ? lesson.items.filter((i) => i.type !== "text").map((i) => i.term)
+          ? lesson.items.filter((i) => i.type !== "text" && i.term).map((i) => i.term)
           : [];
         const mixCount = Math.min(dueTerms.length, Math.round(nextPrompts.length * 0.3));
         nextPrompts = [...dueTerms.slice(0, mixCount), ...nextPrompts].slice(0, nextPrompts.length);
@@ -675,7 +716,7 @@ export default function App() {
           </p>
 
           <div className="flex gap-2 flex-wrap items-center">
-            <button className="btn" onClick={() => speak(target)} disabled={ttsBusy}>
+            <button className="btn" onClick={() => speak(target)} disabled={ttsBusy || !target}>
               {ttsBusy ? "Loading…" : "🔊 Listen"}
             </button>
             {!listening ? (

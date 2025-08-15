@@ -110,7 +110,7 @@ export default async function handler(req, res) {
       meta: { level, topic },
     };
     lesson.fingerprint = lessonFingerprint(lesson);
-    return res.status(200).json({ lesson });
+    return res.status(200).json({ lesson, debug: { raw } });
   } catch (err) {
     const detail = err?.message || String(err);
     return res.status(500).json({ error: "Server error", detail });
