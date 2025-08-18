@@ -3,16 +3,15 @@ import { collection, doc, getDocs, setDoc } from "firebase/firestore";
 import { onAuthStateChanged } from "firebase/auth";
 import { auth, db, ensureAuth, loginEmail, registerEmail, logout } from "./lib/firebase";
 import {
-  MAX_GENERATION_RETRIES,
-  lessonFingerprint,
   loadHashes,
-  saveLesson,
-  finishLessonAndAward,
-  loadProfile,
   upsertVocab,
   translateToThaiBulk,
-  UNIQUENESS_ENABLED,
+  getProfile,
+  updateProfile,
+  getActiveLesson,
+  setActiveLesson,
   createLessonFromApi,
+  finishLessonAndAward,
 } from "./lib/storage";
 import { tipOfTheDay } from "./lib/tips";
 import Lessons from "./pages/Lessons";
@@ -37,6 +36,8 @@ const DEFAULT_PROFILE = {
   streakCount: 0,
   lastActiveDate: null,
   lessonsCompleted: 0,
+  nextIndex: 1,
+  activeLessonId: null,
 };
 
 /** ---------- PERSISTENCE ---------- **/
@@ -58,6 +59,7 @@ function saveVocab(v) {
   }
 }
 
+// lesson shape shim removed
 
 /** ---------- HELPERS (pure functions) ---------- **/
 function norm(s) {
@@ -146,7 +148,7 @@ export default function App() {
     if (!import.meta.env.VITE_USE_FIREBASE) return;
     const unsub = onAuthStateChanged(auth, async (u) => {
       if (u) {
-        const p = await loadProfile({ db, uid: u.uid, defaults: DEFAULT_PROFILE });
+        const p = await getProfile({ db, uid: u.uid });
         setProfile(p);
         const vSnap = await getDocs(collection(db, `users/${u.uid}/vocab`));
         const vv = {};
@@ -154,7 +156,13 @@ export default function App() {
         if (Object.keys(vv).length) setVocab(vv);
         const hashes = await loadHashes();
         setKnownHashes(hashes);
-        await fetchNewLesson({ level: "A1", topic: "daily life", count: 6 });
+        const active = await getActiveLesson({ db, uid: u.uid });
+        if (active) {
+          setCurrentLesson(active);
+          prepareLesson(active);
+        } else {
+          setCurrentLesson(null);
+        }
         setView("home");
       } else {
         setProfile(DEFAULT_PROFILE);
@@ -228,55 +236,15 @@ export default function App() {
     }
   }
 
-  /** ---------- Fetch a NEW LESSON from /api/new-lesson ---------- **/
-  async function fetchNewLesson({ level = "A1", topic = "daily life", count = 6 } = {}) {
-    setLessonLoading(true);
-    setGenStatus("");
-    const topics = ["daily life", "travel", "food", "home", "work", "shopping"];
+  /** ---------- Lesson helpers ---------- **/
+  function prepareLesson(lesson) {
+    let nextPrompts = Array.isArray(lesson.items)
+      ? lesson.items.filter((i) => i.type !== "text" && i.term).map((i) => i.term)
+      : [];
     const now = Date.now();
     const dueTerms = Object.values(vocab)
       .filter((v) => v.nextReviewAt && v.nextReviewAt <= now)
       .map((v) => v.term);
-    const avoidTerms = Object.keys(vocab).filter((t) => !dueTerms.includes(t));
-    let attempt = 0;
-    let lesson = null;
-    while (attempt < MAX_GENERATION_RETRIES) {
-      try {
-        const body = {
-          level,
-          count,
-          topic: attempt === 0 ? topic : topics[attempt % topics.length],
-          avoidTerms,
-        };
-        const cand = await createLessonFromApi(body);
-        cand.fingerprint = cand.fingerprint || lessonFingerprint(cand);
-        if (UNIQUENESS_ENABLED && knownHashes.has(cand.fingerprint)) {
-          attempt++;
-          setGenStatus("duplicate—trying again…");
-          continue;
-        }
-        lesson = cand;
-        break;
-      } catch (e) {
-        console.error("new-lesson error:", e);
-        attempt++;
-      }
-    }
-    if (!lesson) {
-      setGenStatus("Try again.");
-      setLessonLoading(false);
-      return false;
-    }
-
-    const u = await ensureAuth().catch(() => null);
-    const uid = u?.uid || "local";
-    const lessonId = await saveLesson({ ...lesson, source: "api" }, { db, uid });
-    lesson.id = lessonId;
-    setCurrentLesson(lesson);
-
-    let nextPrompts = Array.isArray(lesson?.items)
-      ? lesson.items.filter((i) => i.type !== "text" && i.term).map((i) => i.term)
-      : [];
     const mixCount = Math.min(dueTerms.length, Math.round(nextPrompts.length * 0.3));
     nextPrompts = [...dueTerms.slice(0, mixCount), ...nextPrompts].slice(0, nextPrompts.length);
     const baseThai = {};
@@ -290,27 +258,35 @@ export default function App() {
     setHeard("");
     setShowThai(false);
     setCorrectIndices(new Set());
-    setLessonLoading(false);
+  }
+
+  async function startNextLesson() {
+    setLessonLoading(true);
     setGenStatus("");
+    try {
+      const u = await ensureAuth().catch(() => null);
+      const uid = u?.uid || "local";
+      const prof = await getProfile({ db, uid });
+      const lesson = await createLessonFromApi({ db, uid, index: prof.nextIndex, meta: { level: "A1", topic: "daily life" } });
+      await setActiveLesson(lesson.id, { db, uid });
+      await updateProfile({ nextIndex: prof.nextIndex + 1 }, { db, uid });
+      setCurrentLesson(lesson);
+      prepareLesson(lesson);
+      const p = await getProfile({ db, uid });
+      setProfile(p);
+    } catch (e) {
+      console.error("new-lesson error:", e);
+      setGenStatus("Try again.");
+      setLessonLoading(false);
+      return false;
+    }
+    setLessonLoading(false);
     return true;
   }
 
-  async function handleRepeat(lesson) {
-    const nextPrompts = Array.isArray(lesson.items)
-      ? lesson.items.filter((i) => i.type !== "text" && i.term).map((i) => i.term)
-      : [];
-    const baseThai = {};
-    lesson.items.forEach((i) => {
-      if (i.type !== "text" && i.term) baseThai[i.term] = i.thai || "";
-    });
-    const bulk = translateToThaiBulk(nextPrompts);
-    setPrompts(nextPrompts);
-    setThaiMap({ ...bulk, ...baseThai });
-    setIdx(0);
-    setHeard("");
-    setShowThai(false);
-    setCorrectIndices(new Set());
-    setCurrentLesson({ ...lesson, isRepeat: true });
+  async function handleOpenLesson(lesson) {
+    prepareLesson(lesson);
+    setCurrentLesson(lesson);
     setView("practice");
   }
 
@@ -535,17 +511,16 @@ export default function App() {
     const u = await ensureAuth().catch(() => null);
     const uid = u?.uid || "local";
     if (currentLesson) {
-      await finishLessonAndAward(currentLesson, { db, uid, USE_FIREBASE: import.meta.env.VITE_USE_FIREBASE });
-      const p = await loadProfile({ db, uid, defaults: DEFAULT_PROFILE });
+      await finishLessonAndAward(currentLesson, { db, uid });
+      const p = await getProfile({ db, uid });
       setProfile(p);
       knownHashes.add(currentLesson.fingerprint);
       setKnownHashes(new Set(knownHashes));
+      await startNextLesson();
     }
 
-    await fetchNewLesson({ level: "A1", topic: "daily life", count: 6 });
-
     resetPractice();
-    setView("home");
+    setView("practice");
   }
 
   /** ---------- RENDER ---------- **/
@@ -651,14 +626,17 @@ export default function App() {
               <h1 className="text-3xl font-extrabold">Hi Bee 👋</h1>
               <p className="text-base-content/70">Practice a little each day. Small steps, big progress.</p>
               <div className="flex gap-2">
-                <button className="btn btn-primary" onClick={() => setView("practice")}>Continue practice</button>
-                <button
-                  className={`btn ${lessonLoading ? "btn-disabled" : "btn-secondary"}`}
-                  onClick={() => fetchNewLesson({ level: "A1", topic: "daily life", count: 6 })}
-                  disabled={lessonLoading}
-                >
-                  {lessonLoading ? "Loading…" : "New lesson"}
-                </button>
+                {currentLesson ? (
+                  <button className="btn btn-primary" onClick={() => setView("practice")}>Continue practice</button>
+                ) : (
+                  <button
+                    className={`btn ${lessonLoading ? "btn-disabled" : "btn-primary"}`}
+                    onClick={async () => { await startNextLesson(); setView("practice"); }}
+                    disabled={lessonLoading}
+                  >
+                    {lessonLoading ? "Loading…" : "Start next lesson"}
+                  </button>
+                )}
               </div>
               {genStatus && <p className="text-sm text-warning mt-2">{genStatus}</p>}
             </div>
@@ -694,95 +672,117 @@ export default function App() {
       )}
 
       {view === "lessons" && (
-        <Lessons onRepeat={handleRepeat} />
+        <Lessons onOpen={handleOpenLesson} />
       )}
 
       {view === "practice" && (
-        <div className="card bg-base-100 w-full max-w-none rounded-none sm:rounded-box shadow p-5 sm:p-6">
-          <p className="text-sm text-base-content/70 mb-2">{tip}</p>
-          <h2 className="text-3xl font-extrabold mb-1">{target}</h2>
+        currentLesson ? (
+          <div className="card bg-base-100 w-full max-w-none rounded-none sm:rounded-box shadow p-5 sm:p-6">
+            <h3 className="text-xl font-bold mb-2">Lesson #{currentLesson?.index} — {currentLesson?.title}</h3>
+            <p className="text-sm text-base-content/70 mb-2">{tip}</p>
+            <h2 className="text-3xl font-extrabold mb-1">{target}</h2>
 
-          <div className="flex items-center gap-2 mb-2">
-            <p className="text-sm text-gray-500">
-              {idx + 1} / {prompts.length}
-            </p>
-            <button className="btn btn-xs" onClick={() => setShowThai(v => !v)}>
-              {showThai ? "Hide Thai" : "Show Thai"}
-            </button>
-            {listening && (
-              <span className="badge badge-outline">
-                {hint || "Listening…"} · {seconds}s
-              </span>
+            <div className="flex items-center gap-2 mb-2">
+              <p className="text-sm text-gray-500">
+                {idx + 1} / {prompts.length}
+              </p>
+              <button className="btn btn-xs" onClick={() => setShowThai(v => !v)}>
+                {showThai ? "Hide Thai" : "Show Thai"}
+              </button>
+              {listening && (
+                <span className="badge badge-outline">
+                  {hint || "Listening…"} · {seconds}s
+                </span>
+              )}
+            </div>
+
+            {showThai && (
+              <p className="text-sm text-primary mb-2">
+                Thai: <span className="font-semibold">{thaiMap[target] || "—"}</span>
+              </p>
             )}
-          </div>
 
-          {showThai && (
-            <p className="text-sm text-primary mb-2">
-              Thai: <span className="font-semibold">{thaiMap[target] || "—"}</span>
+            <p className="text-sm text-gray-500 mb-4">
+              Tap Listen, then Start and speak—recording will auto-stop.
             </p>
-          )}
 
-          <p className="text-sm text-gray-500 mb-4">
-            Tap Listen, then Start and speak—recording will auto-stop.
-          </p>
-
-          <div className="flex gap-2 flex-wrap items-center">
-            <button className="btn" onClick={() => speak(target)} disabled={ttsBusy || !target}>
-              {ttsBusy ? "Loading…" : "🔊 Listen"}
-            </button>
-            {!listening ? (
-              <button className="btn btn-accent" onClick={startRec}>🎤 Start</button>
-            ) : (
-              <button className="btn btn-warning" onClick={stopRec}>⏹ Stop</button>
-            )}
-            <button
-              className="btn btn-secondary"
-              onClick={() => {
-                const term = prompts[idx];
-                updateVocab(term, false);
-                setHeard("");
-                setShowThai(false);
-                setIdx((i) => (i + 1) % prompts.length);
-              }}
-            >
-              Skip
-            </button>
-            <button
-              className="btn"
-              onClick={() => {
-                if (idx > 0) {
+            <div className="flex gap-2 flex-wrap items-center">
+              <button className="btn" onClick={() => speak(target)} disabled={ttsBusy || !target}>
+                {ttsBusy ? "Loading…" : "🔊 Listen"}
+              </button>
+              {!listening ? (
+                <button className="btn btn-accent" onClick={startRec}>🎤 Start</button>
+              ) : (
+                <button className="btn btn-warning" onClick={stopRec}>⏹ Stop</button>
+              )}
+              <button
+                className="btn btn-secondary"
+                onClick={() => {
+                  const term = prompts[idx];
+                  updateVocab(term, false);
                   setHeard("");
                   setShowThai(false);
-                  setIdx((i) => Math.max(i - 1, 0));
-                }
-              }}
-              disabled={idx === 0}
+                  setIdx((i) => (i + 1) % prompts.length);
+                }}
+              >
+                Skip
+              </button>
+              <button
+                className="btn"
+                onClick={() => {
+                  if (idx > 0) {
+                    setHeard("");
+                    setShowThai(false);
+                    setIdx((i) => Math.max(i - 1, 0));
+                  }
+                }}
+                disabled={idx === 0}
+              >
+                Back
+              </button>
+            </div>
+
+            <div className="mt-4">
+              <div className="text-sm">
+                Heard: <span className="font-semibold">{heard || "—"}</span>
+              </div>
+
+              {heard && (
+                <div className={`alert mt-3 ${matchOk ? "alert-success" : "alert-error"}`}>
+                  <span>{matchOk ? "✅ Match!" : "❌ Try again"}</span>
+                </div>
+              )}
+
+              <div className="mt-3 flex gap-2">
+                <button
+                  className="btn btn-primary"
+                  disabled={!matchOk || unsatisfiedBefore || idx >= prompts.length - 1}
+                  onClick={nextPrompt}
+                >
+                  Next
+                </button>
+                <button
+                  className="btn btn-success"
+                  disabled={!matchOk || !allCorrect}
+                  onClick={markSessionComplete}
+                >
+                  Finish session
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="card bg-base-100 w-full max-w-none rounded-none sm:rounded-box shadow p-5 sm:p-6 text-center">
+            <p className="mb-4">No active lesson.</p>
+            <button
+              className={`btn ${lessonLoading ? "btn-disabled" : "btn-primary"}`}
+              onClick={startNextLesson}
+              disabled={lessonLoading}
             >
-              Back
+              {lessonLoading ? "Loading…" : "Start next lesson"}
             </button>
           </div>
-
-          <div className="mt-4">
-            <div className="text-sm">
-              Heard: <span className="font-semibold">{heard || "—"}</span>
-            </div>
-
-            {heard && (
-              <div className={`alert mt-3 ${matchOk ? "alert-success" : "alert-error"}`}>
-                <span>{matchOk ? "✅ Match!" : "❌ Try again"}</span>
-              </div>
-            )}
-
-            <div className="mt-3 flex gap-2">
-              <button className="btn btn-primary" disabled={!matchOk || unsatisfiedBefore} onClick={nextPrompt}>
-                Next
-              </button>
-              <button className="btn btn-success" disabled={!matchOk || !allCorrect} onClick={markSessionComplete}>
-                Finish session
-              </button>
-            </div>
-          </div>
-        </div>
+        )
       )}
     </div>
   );
