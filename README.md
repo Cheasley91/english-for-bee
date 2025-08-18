@@ -41,7 +41,9 @@ Open the forwarded port (5173). If the microphone doesn’t work, open the app i
 
 Set the following environment variable in **Project → Settings → Environment Variables**:
 
-- `OPENAI_API_KEY=<your key>` – used by `/api/transcribe` (do not commit keys).
+- `OPENAI_API_KEY=<your key>` – used by server-side routes (do not commit keys).
+
+All OpenAI calls are server-side only; never expose keys in client.
 
 ### Firebase (optional)
 

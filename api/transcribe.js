@@ -5,6 +5,8 @@ export const config = { api: { bodyParser: false } };
 
 export default async function handler(req, res) {
   try {
+    if (!process.env.OPENAI_API_KEY)
+      return res.status(500).json({ error: "Server misconfigured" });
     // collect raw request body (audio/webm)
     const chunks = [];
     for await (const ch of req) chunks.push(ch);
@@ -20,10 +22,14 @@ export default async function handler(req, res) {
       body: form,
     });
 
-    if (!r.ok) return res.status(500).json({ error: await r.text() });
+    if (!r.ok) {
+      console.error("openai upstream", r.status);
+      return res.status(502).json({ error: "Upstream error", status: r.status });
+    }
     const data = await r.json(); // { text: "..." }
     res.status(200).json({ text: data.text || "" });
   } catch (e) {
-    res.status(500).json({ error: String(e) });
+    console.error(e);
+    res.status(500).json({ error: "Server error" });
   }
 }
