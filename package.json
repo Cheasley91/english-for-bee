@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "postbuild": "if grep -R \"sk-\" dist >/dev/null 2>&1; then echo 'Error: found OpenAI key in dist'; exit 1; fi"
   },
   "dependencies": {
     "firebase": "^12.1.0",
