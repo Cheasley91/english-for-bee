@@ -5,6 +5,7 @@ export const maxDuration = 60;
 
 const usage = new Map();
 
+// Limit each user to a maximum of 200 lesson generations per day by default
 function hitLimit(id, max = 200) {
   const day = new Date().toISOString().slice(0, 10);
   const key = `${id}:${day}`;
