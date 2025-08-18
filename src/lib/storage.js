@@ -8,10 +8,9 @@ import {
   query,
   orderBy,
   limit as limitFn,
-  startAfter,
 } from "firebase/firestore";
 import { db, ensureAuth } from "./firebase";
-import { THAI_SEED } from "./thai-dict";
+import { THAI_SEED, backfillThai } from "./thai-dict";
 import { computeLevel, updateStreakOnCompletion } from "./progress";
 
 export const LESSON_HASHES_KEY = "efb_lesson_hashes_v1";
@@ -204,7 +203,12 @@ export async function saveLesson(lesson, { db, uid }) {
 }
 
 export async function markLessonCompleted(lessonId, { db, uid, isRepeat }) {
-  const completed = { completedAt: Date.now(), isRepeat: !!isRepeat, source: isRepeat ? "repeat" : "api" };
+  const completed = {
+    completedAt: Date.now(),
+    status: "completed",
+    isRepeat: !!isRepeat,
+    source: isRepeat ? "repeat" : "api",
+  };
   if (!import.meta.env.VITE_USE_FIREBASE) {
     const raw = localStorage.getItem(LESSONS_KEY);
     const obj = raw ? JSON.parse(raw) : {};
@@ -217,24 +221,24 @@ export async function markLessonCompleted(lessonId, { db, uid, isRepeat }) {
   await updateDoc(doc(db, `users/${uid}/lessons/${lessonId}`), completed);
 }
 
-export async function listLessons({ db, uid, limit = 50, cursor } = {}) {
+export async function listLessons({ db, uid, limit = 50, order = "desc" } = {}) {
   if (!import.meta.env.VITE_USE_FIREBASE) {
     const raw = localStorage.getItem(LESSONS_KEY);
     const obj = raw ? JSON.parse(raw) : {};
-    const arr = Object.values(obj).sort((a, b) => b.createdAt - a.createdAt);
-    return { lessons: arr.slice(0, limit), cursor: null };
+    const arr = Object.values(obj).sort((a, b) =>
+      order === "desc" ? (b.index || 0) - (a.index || 0) : (a.index || 0) - (b.index || 0)
+    );
+    return arr.slice(0, limit);
   }
-  let q = query(
+  const q = query(
     collection(db, `users/${uid}/lessons`),
-    orderBy("createdAt", "desc"),
+    orderBy("index", order),
     limitFn(limit)
   );
-  if (cursor) q = query(q, startAfter(cursor));
   const snap = await getDocs(q);
   const lessons = [];
   snap.forEach((d) => lessons.push({ id: d.id, ...d.data() }));
-  const last = snap.docs[snap.docs.length - 1];
-  return { lessons, cursor: last };
+  return lessons;
 }
 
 export async function hasFingerprint(fp, { db, uid }) {
@@ -314,4 +318,90 @@ export async function finishLessonAndAward(lesson, { db, uid }) {
   }
   return { awardedXp: awarded };
 }
+
+// ---- Linear flow helpers ----
+export async function getProfile({ db, uid }) {
+  return loadProfile({
+    db,
+    uid,
+    defaults: {
+      xp: 0,
+      level: 1,
+      streakCount: 0,
+      lastActiveDate: null,
+      lessonsCompleted: 0,
+      nextIndex: 1,
+      activeLessonId: null,
+      createdAt: 0,
+      updatedAt: 0,
+    },
+  });
+}
+
+export async function updateProfile(patch, { db, uid }) {
+  return saveProfile(patch, { db, uid });
+}
+
+export async function getLesson(id, { db, uid }) {
+  if (!id) return null;
+  if (!import.meta.env.VITE_USE_FIREBASE) {
+    const raw = localStorage.getItem(LESSONS_KEY);
+    const obj = raw ? JSON.parse(raw) : {};
+    return obj[id] || null;
+  }
+  const snap = await getDoc(doc(db, `users/${uid}/lessons/${id}`));
+  return snap.exists() ? { id: snap.id, ...snap.data() } : null;
+}
+
+export async function setActiveLesson(lessonId, { db, uid }) {
+  await saveProfile({ activeLessonId: lessonId }, { db, uid });
+}
+
+export async function clearActiveLesson({ db, uid }) {
+  await saveProfile({ activeLessonId: null }, { db, uid });
+}
+
+export async function getActiveLesson({ db, uid }) {
+  const prof = await getProfile({ db, uid });
+  if (!prof.activeLessonId) return null;
+  return getLesson(prof.activeLessonId, { db, uid });
+}
+
+export async function createLessonFromApi({ db, uid, index, meta = {} }) {
+  const resp = await fetch("/api/new-lesson", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ level: meta.level, topic: meta.topic }),
+  });
+  if (!resp.ok) throw new Error("lesson fetch failed");
+  const data = await resp.json();
+  let lesson = data.lesson || {};
+  lesson.items = backfillThai(Array.isArray(lesson.items) ? lesson.items.slice(0, 10) : []);
+  while (lesson.items.length < 10) {
+    lesson.items.push({ type: "word", term: `word${lesson.items.length + 1}`, thai: "" });
+  }
+  const id = Date.now().toString();
+  const docData = {
+    index,
+    title: lesson.title || "Lesson",
+    items: lesson.items,
+    itemsCount: 10,
+    fingerprint: lesson.fingerprint,
+    status: "incomplete",
+    createdAt: Date.now(),
+    completedAt: null,
+    source: "api",
+  };
+  if (!import.meta.env.VITE_USE_FIREBASE) {
+    const raw = localStorage.getItem(LESSONS_KEY);
+    const obj = raw ? JSON.parse(raw) : {};
+    obj[id] = { id, ...docData };
+    localStorage.setItem(LESSONS_KEY, JSON.stringify(obj));
+  } else {
+    await setDoc(doc(db, `users/${uid}/lessons/${id}`), docData);
+  }
+  return { id, ...docData };
+}
+
+export { hasFingerprint as wasFingerprintCompleted, addFingerprint as recordFingerprint };
 

@@ -11,12 +11,14 @@ A lightweight English‑practice web app tailored for Thai speakers.
 - Thai translations for lesson items (best effort)
 - Daily rotating tip on home and lesson screens
 - Login and registration screens (no guest mode)
+- Every lesson contains exactly 10 items with Thai translations
 
 ### Lessons & Progress
 
-- Completed lessons are stored per user (Firestore or local storage).
-- The **Lessons** tab lists prior lessons with a Repeat button to practice again.
-- XP is awarded only on the first completion of a lesson; repeats give no XP.
+- Linear lesson flow: exactly one active 10‑item lesson at a time.
+- Lessons are numbered and stored per user (Firestore or local storage).
+- The **Lessons** tab lists history with an Open button (no lesson creation).
+- XP is awarded only on the first completion of a lesson fingerprint.
 - Level increases with total XP using a superlinear curve (100, 150, 225, ...).
 - Daily streak counts consecutive days with a completed lesson (America/New_York timezone).
 
