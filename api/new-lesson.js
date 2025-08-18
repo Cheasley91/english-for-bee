@@ -3,6 +3,18 @@
 
 export const maxDuration = 60;
 
+const usage = new Map();
+
+function hitLimit(id, max = 50) {
+  const day = new Date().toISOString().slice(0, 10);
+  const key = `${id}:${day}`;
+  const count = usage.get(key) || 0;
+  if (count >= max) return false;
+  usage.set(key, count + 1);
+  if (usage.size > 1000) usage.delete(usage.keys().next().value);
+  return true;
+}
+
 function normalizeLesson(lesson) {
   if (!lesson || typeof lesson !== "object") return [];
   const acc = [];
@@ -64,11 +76,18 @@ function parseItems(arr) {
 
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+  if (!process.env.OPENAI_API_KEY) {
+    return res.status(500).json({ error: "Server misconfigured" });
+  }
+  const uid = req.headers["x-firebase-uid"] || req.headers["x-uid"];
+  const ip =
+    req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.socket?.remoteAddress || "";
+  const key = uid ? `uid:${uid}` : `ip:${ip}`;
+  if (!hitLimit(key)) {
+    return res.status(429).json({ error: "Daily limit exceeded (50/day)" });
+  }
   try {
     const { level = "beginner", count = 8, topic = "daily life", avoidTerms = [] } = req.body ?? {};
-    if (!process.env.OPENAI_API_KEY) {
-      return res.status(500).json({ error: "Missing OPENAI_API_KEY" });
-    }
     const ctl = new AbortController();
     const t = setTimeout(() => ctl.abort(new Error("timeout")), 25_000);
     const r = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -96,8 +115,8 @@ export default async function handler(req, res) {
     });
     clearTimeout(t);
     if (!r.ok) {
-      const detail = await r.text().catch(() => "");
-      return res.status(500).json({ error: `OpenAI ${r.status}`, detail });
+      console.error("openai upstream", r.status);
+      return res.status(502).json({ error: "Upstream error", status: r.status });
     }
     const data = await r.json();
     let raw = data?.choices?.[0]?.message?.content || "";
@@ -107,7 +126,8 @@ export default async function handler(req, res) {
     try {
       parsed = JSON.parse(raw);
     } catch {
-      return res.status(500).json({ error: "Invalid JSON from OpenAI", detail: raw.slice(0, 1000) });
+      console.error("openai invalid json", raw.slice(0, 200));
+      return res.status(502).json({ error: "Upstream error", status: 502 });
     }
     const items = parseItems(parsed.items).slice(0, Math.min(Math.max(count, 6), 12));
     const lesson = {
@@ -118,7 +138,7 @@ export default async function handler(req, res) {
     lesson.fingerprint = lessonFingerprint(lesson);
     return res.status(200).json({ lesson });
   } catch (err) {
-    const detail = err?.message || String(err);
-    return res.status(500).json({ error: "Server error", detail });
+    console.error(err);
+    return res.status(500).json({ error: "Server error" });
   }
 }

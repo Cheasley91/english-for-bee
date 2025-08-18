@@ -22,7 +22,8 @@ export default async function handler(req, res) {
     const voice = (url.searchParams.get("voice") || DEFAULT_VOICE).toString();
 
     if (!text) return res.status(400).json({ error: "Missing `text` query param" });
-    if (!process.env.OPENAI_API_KEY) return res.status(500).json({ error: "OPENAI_API_KEY not configured" });
+    if (!process.env.OPENAI_API_KEY)
+      return res.status(500).json({ error: "Server misconfigured" });
 
     // Simple guardrails
     if (text.length > 500) return res.status(413).json({ error: "Text too long (max 500 chars)" });
@@ -42,8 +43,8 @@ export default async function handler(req, res) {
     });
 
     if (!r.ok) {
-      const errText = await r.text().catch(() => "");
-      return res.status(500).json({ error: "TTS failed", detail: errText });
+      console.error("openai upstream", r.status);
+      return res.status(502).json({ error: "Upstream error", status: r.status });
     }
 
     // Stream MP3 back to the browser
