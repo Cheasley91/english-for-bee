@@ -87,58 +87,95 @@ export default async function handler(req, res) {
     return res.status(429).json({ error: "Daily limit exceeded (200/day)" });
   }
   try {
-    const { level = "beginner", count = 8, topic = "daily life", avoidTerms = [] } = req.body ?? {};
-    const ctl = new AbortController();
-    const t = setTimeout(() => ctl.abort(new Error("timeout")), 25_000);
-    const r = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: [
-          {
-            role: "system",
-            content:
-              "You generate compact ESL lessons for Thai learners. Respond with JSON only in the shape {title, items:[{type:'word'|'phrase'|'text', term?, content?, thai?}]}. Each word or phrase must include a basic Thai translation in the 'thai' field.",
-          },
-          {
-            role: "user",
-            content: `Level: ${level}, Count: ${count}, Topic: ${topic}. Avoid terms: ${avoidTerms.join(", ")}.`,
-          },
-        ],
-        temperature: 0.7,
-      }),
-      signal: ctl.signal,
-    });
-    clearTimeout(t);
-    if (!r.ok) {
-      console.error("openai upstream", r.status);
-      return res.status(502).json({ error: "Upstream error", status: r.status });
+    const { level = "beginner", topic = "daily life", avoidTerms = [] } = req.body ?? {};
+
+    async function callOpenAI(cnt) {
+      const ctl = new AbortController();
+      const t = setTimeout(() => ctl.abort(new Error("timeout")), 25_000);
+      const r = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+        },
+        body: JSON.stringify({
+          model: "gpt-4o-mini",
+          messages: [
+            {
+              role: "system",
+              content:
+                "You generate compact ESL lessons for Thai learners. Respond with JSON only in the shape {title, items:[{type:'word'|'phrase'|'text', term?, content?, thai?}]}. Each word or phrase must include a basic Thai translation in the 'thai' field.",
+            },
+            {
+              role: "user",
+              content: `Level: ${level}, Count: ${cnt}, Topic: ${topic}. Avoid terms: ${avoidTerms.join(", ")}.`,
+            },
+          ],
+          temperature: 0.7,
+        }),
+        signal: ctl.signal,
+      });
+      clearTimeout(t);
+      if (!r.ok) {
+        console.error("openai upstream", r.status);
+        throw new Error(`upstream ${r.status}`);
+      }
+      const data = await r.json();
+      let raw = data?.choices?.[0]?.message?.content || "";
+      raw = raw.trim();
+      if (raw.startsWith("```")) raw = raw.replace(/^```(?:json)?/i, "").replace(/```$/i, "").trim();
+      let parsed;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        console.error("openai invalid json", raw.slice(0, 200));
+        throw new Error("invalid json");
+      }
+      return {
+        title: typeof parsed.title === "string" && parsed.title.trim() ? parsed.title.trim() : "",
+        items: parseItems(parsed.items),
+      };
     }
-    const data = await r.json();
-    let raw = data?.choices?.[0]?.message?.content || "";
-    raw = raw.trim();
-    if (raw.startsWith("```")) raw = raw.replace(/^```(?:json)?/i, "").replace(/```$/i, "").trim();
-    let parsed;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      console.error("openai invalid json", raw.slice(0, 200));
-      return res.status(502).json({ error: "Upstream error", status: 502 });
+
+    const desired = 10;
+    let first = await callOpenAI(20);
+    let title = first.title || "Lesson";
+    let items = first.items.slice(0, desired);
+    if (items.length < desired) {
+      const more = await callOpenAI(20);
+      items = [...items, ...more.items].slice(0, desired);
+      if (!title && more.title) title = more.title;
     }
-    const items = parseItems(parsed.items).slice(0, Math.min(Math.max(count, 6), 12));
+    if (items.length < desired) {
+      const fallback = [
+        { type: "word", term: "hello", thai: "สวัสดี" },
+        { type: "word", term: "thank you", thai: "ขอบคุณ" },
+        { type: "word", term: "please", thai: "กรุณา" },
+        { type: "word", term: "apple", thai: "แอปเปิล" },
+        { type: "word", term: "water", thai: "น้ำ" },
+        { type: "word", term: "coffee", thai: "กาแฟ" },
+        { type: "word", term: "book", thai: "หนังสือ" },
+        { type: "word", term: "bus", thai: "รถบัส" },
+        { type: "word", term: "market", thai: "ตลาด" },
+        { type: "word", term: "rice", thai: "ข้าว" },
+      ];
+      for (const f of fallback) {
+        if (items.length >= desired) break;
+        items.push(f);
+      }
+    }
+
     const lesson = {
-      title: typeof parsed.title === "string" && parsed.title.trim() ? parsed.title.trim() : "Lesson",
-      items,
+      title,
+      items: items.slice(0, desired),
+      itemsCount: desired,
       meta: { level, topic },
     };
-    lesson.fingerprint = lessonFingerprint(lesson);
-    return res.status(200).json({ lesson });
+    return res
+      .status(200)
+      .json({ lesson: { ...lesson, fingerprint: lessonFingerprint(lesson) } });
   } catch (err) {
     console.error(err);
-    return res.status(500).json({ error: "Server error" });
+    return res.status(500).json({ error: "Upstream error", status: 500 });
   }
 }

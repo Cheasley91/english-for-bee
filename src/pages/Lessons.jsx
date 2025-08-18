@@ -2,15 +2,15 @@ import React, { useEffect, useState } from "react";
 import { listLessons } from "../lib/storage";
 import { ensureAuth, db } from "../lib/firebase";
 
-export default function Lessons({ onRepeat }) {
+export default function Lessons({ onOpen }) {
   const [lessons, setLessons] = useState([]);
 
   useEffect(() => {
     (async () => {
       const u = await ensureAuth();
       if (!u) return;
-      const { lessons } = await listLessons({ db, uid: u.uid, limit: 50 });
-      setLessons(lessons);
+      const arr = await listLessons({ db, uid: u.uid, limit: 50, order: "desc" });
+      setLessons(arr);
     })();
   }, []);
 
@@ -21,13 +21,13 @@ export default function Lessons({ onRepeat }) {
         {lessons.map((lsn) => (
           <li key={lsn.id} className="flex justify-between items-center border-b pb-1">
             <div>
-              <div className="font-semibold">{lsn.title}</div>
+              <div className="font-semibold">#{lsn.index} · {lsn.title}</div>
               <div className="text-xs text-gray-500">
-                {new Date(lsn.createdAt).toLocaleDateString()} · {lsn.items ? lsn.items.length : 0} items {lsn.completedAt ? "· completed" : ""}
+                {new Date(lsn.createdAt).toLocaleDateString()} · {lsn.itemsCount || 0} items · {lsn.status === "completed" ? "completed" : "incomplete"}
               </div>
             </div>
-            <button className="btn btn-sm" onClick={() => onRepeat(lsn)}>
-              Repeat
+            <button className="btn btn-sm" onClick={() => onOpen(lsn)}>
+              Open
             </button>
           </li>
         ))}
