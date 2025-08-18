@@ -12,8 +12,8 @@ import {
   upsertVocab,
   translateToThaiBulk,
   UNIQUENESS_ENABLED,
+  createLessonFromApi,
 } from "./lib/storage";
-import { backfillThai } from "./lib/thai-dict";
 import { tipOfTheDay } from "./lib/tips";
 import Lessons from "./pages/Lessons";
 import { computeLevel } from "./lib/progress";
@@ -58,42 +58,6 @@ function saveVocab(v) {
   }
 }
 
-// --- BEGIN: lesson shape shim (temporary) ---
-function coerceLessonShape(apiData) {
-  // Always return an object with: { title, items: [...], fingerprint? }
-  let lesson = apiData?.lesson ?? {};
-
-  // If server returned a single big blob in lesson.raw, extract vocab lines
-  if (!lesson.items || !Array.isArray(lesson.items) || lesson.items.length === 0) {
-    const raw = String(lesson.raw || "");
-    const lines = raw.split(/\r?\n/);
-
-    const candidates = [];
-    for (const ln of lines) {
-      // Grab lines like "1. Apple" or "Apple"
-      const m = ln.match(/^\s*(?:\d+[).\s-]+)?([A-Za-z][A-Za-z\s'’-]{1,30})\s*$/);
-      if (m) candidates.push(m[1].trim());
-    }
-
-    // Unique, lowercased, first 10
-    const unique = [...new Set(candidates.map(w => w.toLowerCase()))].slice(0, 10);
-
-    if (unique.length > 0) {
-      lesson.items = unique.map(term => ({ type: "word", term }));
-      console.info("coerced items:", lesson.items);
-    }
-  }
-
-  // Fallback so UI never renders blanks
-  if (!lesson.items || lesson.items.length === 0) {
-    const fallback = ["hello", "goodbye", "please", "thank you", "bus", "market"];
-    lesson.items = fallback.map(term => ({ type: "word", term }));
-  }
-
-  if (!lesson.title) lesson.title = "Lesson";
-  return lesson;
-}
-// --- END: lesson shape shim (temporary) ---
 
 /** ---------- HELPERS (pure functions) ---------- **/
 function norm(s) {
@@ -136,6 +100,7 @@ export default function App() {
   const [idx, setIdx] = useState(0);
   const [heard, setHeard] = useState("");
   const [showThai, setShowThai] = useState(false);
+  const [correctIndices, setCorrectIndices] = useState(new Set());
 
   // TTS state
   const [voice, setVoice] = useState(DEFAULT_VOICE);
@@ -165,8 +130,9 @@ export default function App() {
 
   // derived
   const target = prompts[idx];
-  const allDone = idx >= prompts.length - 1;
   const matchOk = norm(heard) === norm(target);
+  const allCorrect = correctIndices.size === prompts.length;
+  const unsatisfiedBefore = Array.from({ length: idx }).some((_, i) => !correctIndices.has(i));
   const tip = tipOfTheDay();
 
   // cleanup on unmount
@@ -282,21 +248,14 @@ export default function App() {
           topic: attempt === 0 ? topic : topics[attempt % topics.length],
           avoidTerms,
         };
-        const resp = await fetch("/api/new-lesson", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        });
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const data = await resp.json();
-        lesson = coerceLessonShape(data);
-        lesson.items = backfillThai(lesson.items || []);
-        lesson.fingerprint = lesson.fingerprint || lessonFingerprint(lesson);
-        if (UNIQUENESS_ENABLED && knownHashes.has(lesson.fingerprint)) {
+        const cand = await createLessonFromApi(body);
+        cand.fingerprint = cand.fingerprint || lessonFingerprint(cand);
+        if (UNIQUENESS_ENABLED && knownHashes.has(cand.fingerprint)) {
           attempt++;
           setGenStatus("duplicate—trying again…");
           continue;
         }
+        lesson = cand;
         break;
       } catch (e) {
         console.error("new-lesson error:", e);
@@ -330,6 +289,7 @@ export default function App() {
     setIdx(0);
     setHeard("");
     setShowThai(false);
+    setCorrectIndices(new Set());
     setLessonLoading(false);
     setGenStatus("");
     return true;
@@ -349,6 +309,7 @@ export default function App() {
     setIdx(0);
     setHeard("");
     setShowThai(false);
+    setCorrectIndices(new Set());
     setCurrentLesson({ ...lesson, isRepeat: true });
     setView("practice");
   }
@@ -539,9 +500,14 @@ export default function App() {
 
   /** ---------- MATCH / NAV ---------- **/
   function nextPrompt() {
-    if (!matchOk) return alert("Try saying it again, then try again.");
+    if (!matchOk || unsatisfiedBefore) return alert("Try saying it again, then try again.");
     const term = prompts[idx];
     updateVocab(term, true);
+    setCorrectIndices((prev) => {
+      const s = new Set(prev);
+      s.add(idx);
+      return s;
+    });
     if (idx < prompts.length - 1) {
       setHeard("");
       setShowThai(false);
@@ -553,12 +519,18 @@ export default function App() {
     setHeard("");
     setShowThai(false);
     setIdx(0);
+    setCorrectIndices(new Set());
   }
 
   async function markSessionComplete() {
-    if (!matchOk) return alert("Say the last prompt correctly first, then Finish.");
+    if (!matchOk || !allCorrect) return alert("Say each prompt correctly before finishing.");
     const term = prompts[idx];
     updateVocab(term, true);
+    setCorrectIndices((prev) => {
+      const s = new Set(prev);
+      s.add(idx);
+      return s;
+    });
 
     const u = await ensureAuth().catch(() => null);
     const uid = u?.uid || "local";
@@ -775,6 +747,19 @@ export default function App() {
             >
               Skip
             </button>
+            <button
+              className="btn"
+              onClick={() => {
+                if (idx > 0) {
+                  setHeard("");
+                  setShowThai(false);
+                  setIdx((i) => Math.max(i - 1, 0));
+                }
+              }}
+              disabled={idx === 0}
+            >
+              Back
+            </button>
           </div>
 
           <div className="mt-4">
@@ -789,10 +774,10 @@ export default function App() {
             )}
 
             <div className="mt-3 flex gap-2">
-              <button className="btn btn-primary" disabled={!matchOk || allDone} onClick={nextPrompt}>
+              <button className="btn btn-primary" disabled={!matchOk || unsatisfiedBefore} onClick={nextPrompt}>
                 Next
               </button>
-              <button className="btn btn-success" disabled={!matchOk || !allDone} onClick={markSessionComplete}>
+              <button className="btn btn-success" disabled={!matchOk || !allCorrect} onClick={markSessionComplete}>
                 Finish session
               </button>
             </div>

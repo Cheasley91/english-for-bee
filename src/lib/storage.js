@@ -11,7 +11,7 @@ import {
   startAfter,
 } from "firebase/firestore";
 import { db, ensureAuth } from "./firebase";
-import { THAI_SEED } from "./thai-dict";
+import { THAI_SEED, backfillThai } from "./thai-dict";
 import { computeLevel, updateStreakOnCompletion } from "./progress";
 
 export const LESSON_HASHES_KEY = "efb_lesson_hashes_v1";
@@ -47,6 +47,70 @@ export function fingerprint(str) {
 
 export function lessonFingerprint(lesson) {
   return fingerprint(JSON.stringify(normalizeLesson(lesson)));
+}
+
+function coerceLessonShape(apiData) {
+  let lesson = apiData?.lesson ?? {};
+  if (!lesson.items || !Array.isArray(lesson.items) || lesson.items.length === 0) {
+    const raw = String(lesson.raw || "");
+    const lines = raw.split(/\r?\n/);
+    const candidates = [];
+    for (const ln of lines) {
+      const m = ln.match(/^\s*(?:\d+[).\s-]+)?([A-Za-z][A-Za-z\s'’-]{1,30})\s*$/);
+      if (m) candidates.push(m[1].trim());
+    }
+    const unique = [...new Set(candidates.map((w) => w.toLowerCase()))].slice(0, 10);
+    if (unique.length > 0) {
+      lesson.items = unique.map((term) => ({ type: "word", term }));
+    }
+  }
+  if (!lesson.items || lesson.items.length === 0) {
+    const fallback = ["hello", "goodbye", "please", "thank you", "bus", "market"];
+    lesson.items = fallback.map((term) => ({ type: "word", term }));
+  }
+  if (!lesson.title) lesson.title = "Lesson";
+  return lesson;
+}
+
+export async function createLessonFromApi({ level = "A1", topic = "daily life", count = 6, avoidTerms = [] } = {}) {
+  const resp = await fetch("/api/new-lesson", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ level, topic, count, avoidTerms }),
+  });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  let data = await resp.json();
+  let lesson = coerceLessonShape(data);
+  lesson.items = backfillThai(lesson.items || []);
+  const missing = lesson.items
+    .filter((i) => (i.type === "word" || i.type === "phrase") && i.term && !i.thai)
+    .map((i) => i.term);
+  if (missing.length) {
+    try {
+      const tr = await fetch("/api/translate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ terms: missing }),
+      });
+      if (tr.ok) {
+        const { translations = {} } = await tr.json();
+        lesson.items = lesson.items.map((it) => {
+          if (
+            (it.type === "word" || it.type === "phrase") &&
+            it.term &&
+            !it.thai &&
+            translations[it.term]
+          ) {
+            return { ...it, thai: translations[it.term] };
+          }
+          return it;
+        });
+      }
+    } catch (e) {
+      console.error("translate fallback error", e);
+    }
+  }
+  return lesson;
 }
 
 function loadHashesLS() {
