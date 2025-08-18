@@ -217,7 +217,7 @@ export async function markLessonCompleted(lessonId, { db, uid, isRepeat }) {
   await updateDoc(doc(db, `users/${uid}/lessons/${lessonId}`), completed);
 }
 
-export async function listLessons({ db, uid, limit = 50, cursor } = {}) {
+export async function listLessons({ db, uid, limit = 200, cursor } = {}) {
   if (!import.meta.env.VITE_USE_FIREBASE) {
     const raw = localStorage.getItem(LESSONS_KEY);
     const obj = raw ? JSON.parse(raw) : {};

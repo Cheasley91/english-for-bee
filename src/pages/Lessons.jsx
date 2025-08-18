@@ -9,7 +9,7 @@ export default function Lessons({ onRepeat }) {
     (async () => {
       const u = await ensureAuth();
       if (!u) return;
-      const { lessons } = await listLessons({ db, uid: u.uid, limit: 50 });
+      const { lessons } = await listLessons({ db, uid: u.uid, limit: 200 });
       setLessons(lessons);
     })();
   }, []);
