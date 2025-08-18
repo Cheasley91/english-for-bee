@@ -5,7 +5,7 @@ export const maxDuration = 60;
 
 const usage = new Map();
 
-function hitLimit(id, max = 50) {
+function hitLimit(id, max = 200) {
   const day = new Date().toISOString().slice(0, 10);
   const key = `${id}:${day}`;
   const count = usage.get(key) || 0;
@@ -84,7 +84,7 @@ export default async function handler(req, res) {
     req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.socket?.remoteAddress || "";
   const key = uid ? `uid:${uid}` : `ip:${ip}`;
   if (!hitLimit(key)) {
-    return res.status(429).json({ error: "Daily limit exceeded (50/day)" });
+    return res.status(429).json({ error: "Daily limit exceeded (200/day)" });
   }
   try {
     const { level = "beginner", count = 8, topic = "daily life", avoidTerms = [] } = req.body ?? {};
