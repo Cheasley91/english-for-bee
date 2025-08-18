@@ -174,6 +174,17 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === "Escape" && view === "practice") {
+        resetPractice();
+        setView("lessons");
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [view]);
+
   async function handleLogin() {
     try {
       await loginEmail(email, password);
@@ -664,6 +675,9 @@ export default function App() {
       {view === "practice" && (
         currentLesson ? (
           <div className="card bg-base-100 w-full max-w-none rounded-none sm:rounded-box shadow p-5 sm:p-6">
+            <button className="btn btn-ghost btn-sm" onClick={() => { resetPractice(); setView("lessons"); }}>
+              ← Back to Lessons
+            </button>
             <h3 className="text-xl font-bold mb-2">Lesson #{currentLesson?.index} — {currentLesson?.title}</h3>
             <p className="text-sm text-base-content/70 mb-2">{tip}</p>
             <h2 className="text-3xl font-extrabold mb-1">{target}</h2>
