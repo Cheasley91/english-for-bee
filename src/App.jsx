@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { collection, doc, getDocs, setDoc } from "firebase/firestore";
 import { onAuthStateChanged } from "firebase/auth";
@@ -101,6 +101,14 @@ export default function App() {
   const [idx, setIdx] = useState(0);
   const [heard, setHeard] = useState("");
   const [showThai, setShowThai] = useState(false);
+  const [correctIndices, setCorrectIndices] = useState(new Set());
+
+  const unsatisfiedBefore = useMemo(() => {
+    for (let i = 0; i < idx; i++) {
+      if (!correctIndices.has(i)) return true;
+    }
+    return false;
+  }, [idx, correctIndices]);
 
   // TTS state
   const [voice, setVoice] = useState(DEFAULT_VOICE);
@@ -458,9 +466,18 @@ export default function App() {
   }, [idx]);
 
   function nextPrompt() {
-    if (!matchOk) return alert("Try saying it again, then try again.");
+    if ((!matchOk && !correctIndices.has(idx)) || unsatisfiedBefore) {
+      return alert("Try saying it again, then try again.");
+    }
     const term = prompts[idx];
-    updateVocab(term, true);
+    if (matchOk && !correctIndices.has(idx)) {
+      updateVocab(term, true);
+      setCorrectIndices((prev) => {
+        const next = new Set(prev);
+        next.add(idx);
+        return next;
+      });
+    }
     if (idx < prompts.length - 1) {
       setHeard("");
       setShowThai(false);
@@ -472,6 +489,7 @@ export default function App() {
     setHeard("");
     setShowThai(false);
     setIdx(0);
+    setCorrectIndices(new Set());
   }
 
   useEffect(() => {
@@ -677,7 +695,11 @@ export default function App() {
               )}
 
               <div className="mt-3 flex gap-2">
-                <button className="btn btn-primary" disabled={!matchOk || allDone} onClick={nextPrompt}>
+                <button
+                  className="btn btn-primary"
+                  disabled={(!matchOk && !correctIndices.has(idx)) || unsatisfiedBefore}
+                  onClick={nextPrompt}
+                >
                   Next
                 </button>
                 <button className="btn btn-success" disabled={!matchOk || !allDone} onClick={markSessionComplete}>
