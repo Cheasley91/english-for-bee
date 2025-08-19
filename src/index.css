@@ -1,3 +1,6 @@
 /* base styles for build */
 :root { font-family: Inter, system-ui, Arial, sans-serif; }
-body { min-height: 100vh; }
+body {
+  min-height: 100vh;
+  overflow-x: hidden;
+}

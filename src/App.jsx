@@ -506,49 +506,50 @@ export default function App() {
 
   /** ---------- RENDER ---------- **/
   return (
-    <div className="min-h-screen bg-base-200 p-0 sm:p-6">
-      {/* Navbar */}
-      <div className="navbar bg-base-100 rounded-none sm:rounded-box shadow mb-6">
-        <div className="flex-1 px-2 text-xl font-bold">🐝 English for Bee</div>
-        <div className="flex-none flex items-center gap-2">
-            <label className="label cursor-pointer gap-2">
-              <span className="label-text">Voice</span>
-              <select
-                className="select select-sm select-bordered"
-                value={voice}
-                onChange={(e) => setVoice(e.target.value)}
-                title="Voice"
+    <div className="min-h-screen bg-base-200 overflow-x-hidden">
+      <div className="max-w-screen-sm sm:max-w-screen-md mx-auto px-4 sm:px-6 py-4">
+        {/* Navbar */}
+        <div className="navbar bg-base-100 rounded-none sm:rounded-box shadow mb-6">
+          <div className="flex-1 px-2 text-xl font-bold">🐝 English for Bee</div>
+          <div className="flex-none flex items-center gap-2 flex-wrap justify-end">
+              <label className="label cursor-pointer gap-2 max-w-[8rem]">
+                <span className="label-text">Voice</span>
+                <select
+                  className="select select-sm select-bordered w-full"
+                  value={voice}
+                  onChange={(e) => setVoice(e.target.value)}
+                  title="Voice"
+                >
+                  {VALID_VOICES.map(v => (
+                    <option key={v} value={v}>
+                      {v.charAt(0).toUpperCase() + v.slice(1)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <button className={`btn btn-ghost btn-sm sm:btn-md ${view === "home" ? "btn-active" : ""}`} onClick={() => setView("home")}>
+                Home
+              </button>
+              <button
+                className={`btn btn-ghost btn-sm sm:btn-md ${view === "practice" ? "btn-active" : ""}`}
+                onClick={() => { resetPractice(); setView("practice"); }}
               >
-                {VALID_VOICES.map(v => (
-                  <option key={v} value={v}>
-                    {v.charAt(0).toUpperCase() + v.slice(1)}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <button className={`btn btn-ghost ${view === "home" ? "btn-active" : ""}`} onClick={() => setView("home")}>
-              Home
-            </button>
-            <button
-              className={`btn btn-ghost ${view === "practice" ? "btn-active" : ""}`}
-              onClick={() => { resetPractice(); setView("practice"); }}
-            >
-              Practice
-            </button>
-            <button
-              className={`btn btn-ghost ${view === "lessons" ? "btn-active" : ""}`}
-              onClick={() => setView("lessons")}
-            >
-              Lessons
-            </button>
-            <button className="btn btn-ghost" onClick={handleLogout}>Logout</button>
+                Practice
+              </button>
+              <button
+                className={`btn btn-ghost btn-sm sm:btn-md ${view === "lessons" ? "btn-active" : ""}`}
+                onClick={() => setView("lessons")}
+              >
+                Lessons
+              </button>
+              <button className="btn btn-ghost btn-sm sm:btn-md" onClick={handleLogout}>Logout</button>
+            </div>
           </div>
-        </div>
 
-      {/* Views */}
-      {view === "home" && (
-        <div className="w-full">
+        {/* Views */}
+        {view === "home" && (
+          <div className="w-full">
           {/* Hero */}
           <div className="hero bg-base-100 rounded-none sm:rounded-box shadow mb-4">
             <div className="hero-content w-full flex-col items-center text-center gap-2">
@@ -572,7 +573,7 @@ export default function App() {
           </div>
 
           {/* Stats */}
-          <div className="stats shadow w-full mb-4">
+          <div className="stats stats-vertical sm:stats-horizontal shadow w-full mb-4">
             <div className="stat">
               <div className="stat-title">Level</div>
               <div className="stat-value">{profile.level || 1}</div>
@@ -606,12 +607,11 @@ export default function App() {
 
       {view === "practice" && (
         currentLesson ? (
-          <div className="card bg-base-100 w-full max-w-none rounded-none sm:rounded-box shadow p-5 sm:p-6">
-            <h3 className="text-xl font-bold mb-2">Lesson #{currentLesson?.index} — {currentLesson?.title}</h3>
-            <p className="text-sm text-base-content/70 mb-2">{tip}</p>
-            <h2 className="text-3xl font-extrabold mb-1">{target}</h2>
+          <div className="card bg-base-100 w-full rounded-none sm:rounded-box shadow p-5 sm:p-6">
+            <h3 className="text-lg sm:text-xl font-bold mb-2 break-words">Lesson #{currentLesson?.index} — {currentLesson?.title}</h3>
+            <h2 className="text-3xl font-extrabold mb-1 break-words">{target}</h2>
 
-            <div className="flex items-center gap-2 mb-2">
+            <div className="flex flex-wrap items-center gap-2 mb-2">
               <p className="text-sm text-gray-500">
                 {idx + 1} / {prompts.length}
               </p>
@@ -631,28 +631,24 @@ export default function App() {
               </p>
             )}
 
-            <p className="text-sm text-gray-500 mb-4">
-              Tap Listen, then Start and speak—recording will auto-stop.
-            </p>
-
-            <div className="flex gap-2 flex-wrap items-center">
-              <button className="btn" onClick={() => speak(target)} disabled={ttsBusy || !target}>
+            <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:gap-2 items-center mb-4">
+              <button className="btn w-full sm:w-auto" onClick={() => speak(target)} disabled={ttsBusy || !target}>
                 {ttsBusy ? "Loading…" : "🔊 Listen"}
               </button>
               {!listening ? (
-                <button className="btn btn-accent" onClick={startRec}>🎤 Start</button>
+                <button className="btn btn-accent w-full sm:w-auto" onClick={startRec}>🎤 Start</button>
               ) : (
-                <button className="btn btn-warning" onClick={stopRec}>⏹ Stop</button>
+                <button className="btn btn-warning w-full sm:w-auto" onClick={stopRec}>⏹ Stop</button>
               )}
               <button
-                className="btn"
+                className="btn w-full sm:w-auto"
                 onClick={prevPrompt}
                 disabled={idx === 0}
               >
                 Back
               </button>
               <button
-                className="btn btn-secondary"
+                className="btn btn-secondary w-full sm:w-auto"
                 onClick={() => {
                   const term = prompts[idx];
                   updateVocab(term, false);
@@ -676,18 +672,25 @@ export default function App() {
                 </div>
               )}
 
-              <div className="mt-3 flex gap-2">
-                <button className="btn btn-primary" disabled={!matchOk || allDone} onClick={nextPrompt}>
-                  Next
-                </button>
-                <button className="btn btn-success" disabled={!matchOk || !allDone} onClick={markSessionComplete}>
-                  Finish session
-                </button>
+              <div className="mt-3 sm:flex sm:items-start sm:gap-4">
+                <div className="grid grid-cols-2 gap-2 sm:flex sm:gap-2">
+                  <button className="btn btn-primary w-full sm:w-auto" disabled={!matchOk || allDone} onClick={nextPrompt}>
+                    Next
+                  </button>
+                  <button className="btn btn-success w-full sm:w-auto" disabled={!matchOk || !allDone} onClick={markSessionComplete}>
+                    Finish session
+                  </button>
+                </div>
+                <div className="mt-4 sm:mt-0 sm:ml-auto text-right">
+                  <div className="inline-block text-xs sm:text-sm text-base-content/70 bg-base-200 px-2 py-1 rounded">
+                    Tip: {tip}
+                  </div>
+                </div>
               </div>
             </div>
           </div>
         ) : (
-          <div className="card bg-base-100 w-full max-w-none rounded-none sm:rounded-box shadow p-5 sm:p-6 text-center">
+          <div className="card bg-base-100 w-full rounded-none sm:rounded-box shadow p-5 sm:p-6 text-center">
             <p className="mb-4">No active lesson.</p>
             <button
               className={`btn ${lessonLoading ? "btn-disabled" : "btn-primary"}`}
@@ -699,6 +702,7 @@ export default function App() {
           </div>
         )
       )}
+      </div>
     </div>
   );
 }
