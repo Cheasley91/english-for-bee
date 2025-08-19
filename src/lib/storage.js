@@ -367,6 +367,45 @@ export async function getActiveLesson({ db, uid }) {
   return getLesson(prof.activeLessonId, { db, uid });
 }
 
+const _progressTimers = new Map();
+
+export async function loadLessonProgress({ db, uid, lessonId }) {
+  if (!lessonId) return null;
+  if (!import.meta.env.VITE_USE_FIREBASE) {
+    const raw = localStorage.getItem(LESSONS_KEY);
+    const obj = raw ? JSON.parse(raw) : {};
+    return obj[lessonId]?.progress || null;
+  }
+  const snap = await getDoc(doc(db, `users/${uid}/lessons/${lessonId}`));
+  return snap.exists() ? snap.data().progress || null : null;
+}
+
+export async function saveLessonProgress({ db, uid, lessonId, completedIndices = [], lastIdx = 0 }) {
+  const unique = Array.from(new Set(completedIndices)).sort((a, b) => a - b);
+  const progress = { completedIndices: unique, lastIdx, updatedAt: Date.now() };
+  const key = `${uid}:${lessonId}`;
+  return new Promise((resolve, reject) => {
+    const run = async () => {
+      try {
+        if (!import.meta.env.VITE_USE_FIREBASE) {
+          const raw = localStorage.getItem(LESSONS_KEY);
+          const obj = raw ? JSON.parse(raw) : {};
+          obj[lessonId] = obj[lessonId] || {};
+          obj[lessonId].progress = progress;
+          localStorage.setItem(LESSONS_KEY, JSON.stringify(obj));
+        } else {
+          await setDoc(doc(db, `users/${uid}/lessons/${lessonId}`), { progress }, { merge: true });
+        }
+        resolve();
+      } catch (e) {
+        reject(e);
+      }
+    };
+    if (_progressTimers.has(key)) clearTimeout(_progressTimers.get(key));
+    _progressTimers.set(key, setTimeout(run, 250));
+  });
+}
+
 export async function createLessonFromApi({ db, uid, index, meta = {} }) {
   const resp = await fetch("/api/new-lesson", {
     method: "POST",

@@ -13,6 +13,8 @@ import {
   setActiveLesson,
   createLessonFromApi,
   finishLessonAndAward,
+  loadLessonProgress,
+  saveLessonProgress,
 } from "./lib/storage";
 import { tipOfTheDay } from "./lib/tips";
 import Lessons from "./pages/Lessons";
@@ -101,6 +103,7 @@ export default function App() {
   const [idx, setIdx] = useState(0);
   const [heard, setHeard] = useState("");
   const [showThai, setShowThai] = useState(false);
+  const [correctIndices, setCorrectIndices] = useState(new Set());
 
   // TTS state
   const [voice, setVoice] = useState(DEFAULT_VOICE);
@@ -130,9 +133,31 @@ export default function App() {
 
   // derived
   const target = prompts[idx];
-  const allDone = idx >= prompts.length - 1;
   const matchOk = norm(heard) === norm(target);
+  const allDone = correctIndices.size >= prompts.length && prompts.length > 0;
+  const canNext = matchOk || correctIndices.has(idx);
   const tip = tipOfTheDay();
+
+  useEffect(() => {
+    if (matchOk && currentLesson && !correctIndices.has(idx)) {
+      const newSet = new Set(correctIndices);
+      newSet.add(idx);
+      setCorrectIndices(newSet);
+      const save = async () => {
+        const u = await ensureAuth().catch(() => null);
+        const uid = u?.uid || "local";
+        await saveLessonProgress({
+          db,
+          uid,
+          lessonId: currentLesson.id,
+          completedIndices: [...newSet],
+          lastIdx: idx,
+        });
+      };
+      save();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [matchOk, idx, currentLesson]);
 
   // cleanup on unmount
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -156,7 +181,6 @@ export default function App() {
         const active = await getActiveLesson({ db, uid: u.uid });
         if (active) {
           setCurrentLesson(active);
-          prepareLesson(active);
         } else {
           setCurrentLesson(null);
         }
@@ -213,25 +237,16 @@ export default function App() {
 
   /** ---------- Lesson helpers ---------- **/
   function prepareLesson(lesson) {
-    let nextPrompts = Array.isArray(lesson.items)
-      ? lesson.items.filter((i) => i.type !== "text" && i.term).map((i) => i.term)
-      : [];
-    const now = Date.now();
-    const dueTerms = Object.values(vocab)
-      .filter((v) => v.nextReviewAt && v.nextReviewAt <= now)
-      .map((v) => v.term);
-    const mixCount = Math.min(dueTerms.length, Math.round(nextPrompts.length * 0.3));
-    nextPrompts = [...dueTerms.slice(0, mixCount), ...nextPrompts].slice(0, nextPrompts.length);
+    const items = Array.isArray(lesson.items) ? lesson.items.slice(0, 10) : [];
+    const ordered = items.map((i) => i.term);
     const baseThai = {};
-    lesson.items.forEach((i) => {
-      if (i.type !== "text" && i.term) baseThai[i.term] = i.thai || "";
+    items.forEach((i) => {
+      if (i && i.term) baseThai[i.term] = i.thai || "";
     });
-    const bulk = translateToThaiBulk(nextPrompts);
-    setPrompts(nextPrompts);
+    const missing = ordered.filter((t) => !baseThai[t]);
+    const bulk = missing.length ? translateToThaiBulk(missing) : {};
+    setPrompts(ordered);
     setThaiMap({ ...bulk, ...baseThai });
-    setIdx(0);
-    setHeard("");
-    setShowThai(false);
   }
 
   async function startNextLesson() {
@@ -246,6 +261,10 @@ export default function App() {
       await updateProfile({ nextIndex: prof.nextIndex + 1 }, { db, uid });
       setCurrentLesson(lesson);
       prepareLesson(lesson);
+      setCorrectIndices(new Set());
+      setIdx(0);
+      setHeard("");
+      setShowThai(false);
       const p = await getProfile({ db, uid });
       setProfile(p);
     } catch (e) {
@@ -260,6 +279,19 @@ export default function App() {
 
   async function handleOpenLesson(lesson) {
     prepareLesson(lesson);
+    const u = await ensureAuth().catch(() => null);
+    const uid = u?.uid || "local";
+    const prog = await loadLessonProgress({ db, uid, lessonId: lesson.id });
+    const completed = new Set(prog?.completedIndices || []);
+    setCorrectIndices(completed);
+    const items = Array.isArray(lesson.items) ? lesson.items : [];
+    const firstIncomplete = (() => {
+      for (let i = 0; i < items.length; i++) if (!completed.has(i)) return i;
+      return Math.max(0, items.length - 1);
+    })();
+    setIdx(firstIncomplete);
+    setHeard("");
+    setShowThai(false);
     setCurrentLesson(lesson);
     setView("practice");
   }
@@ -449,22 +481,64 @@ export default function App() {
   }
 
   /** ---------- MATCH / NAV ---------- **/
-  const prevPrompt = useCallback(() => {
+  const prevPrompt = useCallback(async () => {
     if (idx > 0) {
+      const newIdx = idx - 1;
       setHeard("");
       setShowThai(false);
-      setIdx((i) => Math.max(0, i - 1));
+      setIdx(newIdx);
+      const u = await ensureAuth().catch(() => null);
+      const uid = u?.uid || "local";
+      if (currentLesson) {
+        await saveLessonProgress({
+          db,
+          uid,
+          lessonId: currentLesson.id,
+          completedIndices: [...correctIndices],
+          lastIdx: newIdx,
+        });
+      }
     }
-  }, [idx]);
+  }, [idx, correctIndices, currentLesson]);
 
-  function nextPrompt() {
-    if (!matchOk) return alert("Try saying it again, then try again.");
+  async function nextPrompt() {
+    if (idx >= prompts.length - 1) return;
     const term = prompts[idx];
-    updateVocab(term, true);
-    if (idx < prompts.length - 1) {
-      setHeard("");
-      setShowThai(false);
-      setIdx((i) => i + 1);
+    if (matchOk) updateVocab(term, true);
+    const newIdx = Math.min(idx + 1, prompts.length - 1);
+    setHeard("");
+    setShowThai(false);
+    setIdx(newIdx);
+    const u = await ensureAuth().catch(() => null);
+    const uid = u?.uid || "local";
+    if (currentLesson) {
+      await saveLessonProgress({
+        db,
+        uid,
+        lessonId: currentLesson.id,
+        completedIndices: [...correctIndices],
+        lastIdx: newIdx,
+      });
+    }
+  }
+
+  async function skipPrompt() {
+    const term = prompts[idx];
+    updateVocab(term, false);
+    const newIdx = Math.min(idx + 1, prompts.length - 1);
+    setHeard("");
+    setShowThai(false);
+    setIdx(newIdx);
+    const u = await ensureAuth().catch(() => null);
+    const uid = u?.uid || "local";
+    if (currentLesson) {
+      await saveLessonProgress({
+        db,
+        uid,
+        lessonId: currentLesson.id,
+        completedIndices: [...correctIndices],
+        lastIdx: newIdx,
+      });
     }
   }
 
@@ -472,6 +546,7 @@ export default function App() {
     setHeard("");
     setShowThai(false);
     setIdx(0);
+    setCorrectIndices(new Set());
   }
 
   useEffect(() => {
@@ -485,10 +560,7 @@ export default function App() {
   }, [view, prevPrompt]);
 
   async function markSessionComplete() {
-    if (!matchOk) return alert("Say the last prompt correctly first, then Finish.");
-    const term = prompts[idx];
-    updateVocab(term, true);
-
+    if (!allDone) return;
     const u = await ensureAuth().catch(() => null);
     const uid = u?.uid || "local";
     if (currentLesson) {
@@ -499,7 +571,6 @@ export default function App() {
       setKnownHashes(new Set(knownHashes));
       await startNextLesson();
     }
-
     resetPractice();
     setView("practice");
   }
@@ -532,7 +603,14 @@ export default function App() {
             </button>
             <button
               className={`btn btn-ghost ${view === "practice" ? "btn-active" : ""}`}
-              onClick={() => { resetPractice(); setView("practice"); }}
+              onClick={() => {
+                if (currentLesson) {
+                  handleOpenLesson(currentLesson);
+                } else {
+                  resetPractice();
+                  setView("practice");
+                }
+              }}
             >
               Practice
             </button>
@@ -648,13 +726,7 @@ export default function App() {
               </button>
               <button
                 className="btn btn-secondary"
-                onClick={() => {
-                  const term = prompts[idx];
-                  updateVocab(term, false);
-                  setHeard("");
-                  setShowThai(false);
-                  setIdx((i) => (i + 1) % prompts.length);
-                }}
+                onClick={skipPrompt}
               >
                 Skip
               </button>
@@ -672,10 +744,18 @@ export default function App() {
               )}
 
               <div className="mt-3 flex gap-2">
-                <button className="btn btn-primary" disabled={!matchOk || allDone} onClick={nextPrompt}>
+                <button
+                  className="btn btn-primary"
+                  disabled={!canNext || idx >= prompts.length - 1}
+                  onClick={nextPrompt}
+                >
                   Next
                 </button>
-                <button className="btn btn-success" disabled={!matchOk || !allDone} onClick={markSessionComplete}>
+                <button
+                  className="btn btn-success"
+                  disabled={!allDone}
+                  onClick={markSessionComplete}
+                >
                   Finish session
                 </button>
               </div>
