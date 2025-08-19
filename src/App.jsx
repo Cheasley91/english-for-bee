@@ -511,7 +511,7 @@ export default function App() {
         {/* Navbar */}
         <div className="navbar bg-base-100 rounded-none sm:rounded-box shadow mb-6">
           <div className="flex-1 px-2 text-xl font-bold">🐝 English for Bee</div>
-          <div className="flex-none flex items-center gap-2 flex-wrap justify-end">
+          <div className="flex items-center gap-2 flex-wrap justify-end">
               <label className="label cursor-pointer gap-2 max-w-[8rem]">
                 <span className="label-text">Voice</span>
                 <select
