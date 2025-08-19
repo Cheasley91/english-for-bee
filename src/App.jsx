@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { collection, doc, getDocs, setDoc } from "firebase/firestore";
 import { onAuthStateChanged } from "firebase/auth";
@@ -449,6 +449,14 @@ export default function App() {
   }
 
   /** ---------- MATCH / NAV ---------- **/
+  const prevPrompt = useCallback(() => {
+    if (idx > 0) {
+      setHeard("");
+      setShowThai(false);
+      setIdx((i) => Math.max(0, i - 1));
+    }
+  }, [idx]);
+
   function nextPrompt() {
     if (!matchOk) return alert("Try saying it again, then try again.");
     const term = prompts[idx];
@@ -465,6 +473,16 @@ export default function App() {
     setShowThai(false);
     setIdx(0);
   }
+
+  useEffect(() => {
+    function handleKey(e) {
+      if (view === "practice" && e.key === "ArrowLeft") {
+        prevPrompt();
+      }
+    }
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [view, prevPrompt]);
 
   async function markSessionComplete() {
     if (!matchOk) return alert("Say the last prompt correctly first, then Finish.");
@@ -626,6 +644,13 @@ export default function App() {
               ) : (
                 <button className="btn btn-warning" onClick={stopRec}>⏹ Stop</button>
               )}
+              <button
+                className="btn"
+                onClick={prevPrompt}
+                disabled={idx === 0}
+              >
+                Back
+              </button>
               <button
                 className="btn btn-secondary"
                 onClick={() => {
