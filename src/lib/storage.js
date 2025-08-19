@@ -403,5 +403,66 @@ export async function createLessonFromApi({ db, uid, index, meta = {} }) {
   return { id, ...docData };
 }
 
+const LESSON_PROGRESS_PREFIX = "efb_progress_";
+const progressTimers = {};
+
+function normalizeLessonProgress(p = {}) {
+  const arr = Array.isArray(p.completedIndices) ? p.completedIndices : [];
+  const set = new Set(arr.filter((n) => Number.isInteger(n) && n >= 0));
+  const completedIndices = Array.from(set).sort((a, b) => a - b);
+  const lastIdx = Number.isInteger(p.lastIdx) ? p.lastIdx : 0;
+  return { completedIndices, lastIdx };
+}
+
+function loadLessonProgressLS(lessonId) {
+  try {
+    const key = `${LESSON_PROGRESS_PREFIX}${lessonId}`;
+    const raw = localStorage.getItem(key);
+    return normalizeLessonProgress(raw ? JSON.parse(raw) : {});
+  } catch {
+    return { completedIndices: [], lastIdx: 0 };
+  }
+}
+
+function saveLessonProgressLS(lessonId, data) {
+  try {
+    const key = `${LESSON_PROGRESS_PREFIX}${lessonId}`;
+    localStorage.setItem(key, JSON.stringify({ ...data, updatedAt: Date.now() }));
+  } catch {
+    /* ignore */
+  }
+}
+
+export async function loadLessonProgress({ db, uid, lessonId }) {
+  const local = loadLessonProgressLS(lessonId);
+  if (!import.meta.env.VITE_USE_FIREBASE) return local;
+  try {
+    const snap = await getDoc(doc(db, `users/${uid}/lessons/${lessonId}`));
+    const prog = snap.exists() && snap.data().progress ? snap.data().progress : {};
+    return normalizeLessonProgress({ ...local, ...prog });
+  } catch {
+    return local;
+  }
+}
+
+export function saveLessonProgress({ db, uid, lessonId, completedIndices = [], lastIdx = 0 }) {
+  const norm = normalizeLessonProgress({ completedIndices, lastIdx });
+  saveLessonProgressLS(lessonId, norm);
+  if (!import.meta.env.VITE_USE_FIREBASE) return;
+  const write = async () => {
+    try {
+      await setDoc(
+        doc(db, `users/${uid}/lessons/${lessonId}`),
+        { progress: { ...norm, updatedAt: Date.now() } },
+        { merge: true }
+      );
+    } catch {
+      /* ignore */
+    }
+  };
+  clearTimeout(progressTimers[lessonId]);
+  progressTimers[lessonId] = setTimeout(write, 300);
+}
+
 export { hasFingerprint as wasFingerprintCompleted, addFingerprint as recordFingerprint };
 
