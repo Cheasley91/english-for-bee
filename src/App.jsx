@@ -221,15 +221,33 @@ export default function App() {
 
   /** ---------- Lesson helpers ---------- **/
   function prepareLesson(lesson) {
-    let nextPrompts = Array.isArray(lesson.items)
-      ? lesson.items.filter((i) => i.type !== "text" && i.term).map((i) => i.term)
-      : [];
-    const now = Date.now();
-    const dueTerms = Object.values(vocab)
-      .filter((v) => v.nextReviewAt && v.nextReviewAt <= now)
-      .map((v) => v.term);
-    const mixCount = Math.min(dueTerms.length, Math.round(nextPrompts.length * 0.3));
-    nextPrompts = [...dueTerms.slice(0, mixCount), ...nextPrompts].slice(0, nextPrompts.length);
+    const orderKey = `efb_order_${lesson.id}`;
+    let nextPrompts = null;
+
+    if (typeof window !== "undefined") {
+      try {
+        const cached = JSON.parse(localStorage.getItem(orderKey));
+        if (Array.isArray(cached) && cached.length) nextPrompts = cached;
+      } catch {
+        /* ignore */
+      }
+    }
+
+    if (!nextPrompts) {
+      nextPrompts = Array.isArray(lesson.items)
+        ? lesson.items.filter((i) => i.type !== "text" && i.term).map((i) => i.term)
+        : [];
+      const now = Date.now();
+      const dueTerms = Object.values(vocab)
+        .filter((v) => v.nextReviewAt && v.nextReviewAt <= now)
+        .map((v) => v.term);
+      const mixCount = Math.min(dueTerms.length, Math.round(nextPrompts.length * 0.3));
+      nextPrompts = [...dueTerms.slice(0, mixCount), ...nextPrompts].slice(0, nextPrompts.length);
+      if (typeof window !== "undefined") {
+        try { localStorage.setItem(orderKey, JSON.stringify(nextPrompts)); } catch { /* ignore */ }
+      }
+    }
+
     const baseThai = {};
     lesson.items.forEach((i) => {
       if (i.type !== "text" && i.term) baseThai[i.term] = i.thai || "";
