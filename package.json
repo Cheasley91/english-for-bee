@@ -8,7 +8,6 @@
     "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "test": "vitest run",
     "postbuild": "if grep -R \"sk-\" dist >/dev/null 2>&1; then echo 'Error: found OpenAI key in dist'; exit 1; fi"
   },
   "dependencies": {
@@ -20,8 +19,6 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.32.0",
-    "@testing-library/jest-dom": "^6.7.0",
-    "@testing-library/react": "^16.3.0",
     "@types/react": "^19.1.9",
     "@types/react-dom": "^19.1.7",
     "@vitejs/plugin-react": "^4.7.0",
@@ -29,8 +26,6 @@
     "eslint-plugin-react-hooks": "^5.2.0",
     "eslint-plugin-react-refresh": "^0.4.20",
     "globals": "^16.3.0",
-    "jsdom": "^26.1.0",
-    "vite": "^7.1.0",
-    "vitest": "^3.2.4"
+    "vite": "^7.1.0"
   }
 }
