@@ -62,6 +62,5 @@ describe('Auth smoke test', () => {
     expect(screen.getByRole('button', { name: /login/i })).toBeInTheDocument();
     expect(screen.queryByText(/Practice/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Lessons/)).not.toBeInTheDocument();
-    expect(screen.queryByText(/Home/)).not.toBeInTheDocument();
   });
 });

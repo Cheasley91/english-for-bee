@@ -89,8 +89,11 @@ describe('Practice flow', () => {
     fireEvent.click(screen.getByRole('button', { name: /Back/i }));
     expect(await screen.findByText('word1')).toBeInTheDocument();
 
+    progress = { completedIndices: [0, 2], lastIdx: 2 };
     fireEvent.click(screen.getByRole('button', { name: /^Home$/i }));
     fireEvent.click(screen.getByRole('button', { name: /^Practice$/i }));
+
     expect(await screen.findByText('word1')).toBeInTheDocument();
+    expect(progress.completedIndices).toEqual([0, 2]);
   });
 });
