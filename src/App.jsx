@@ -606,9 +606,8 @@ export default function App() {
 
       {view === "practice" && (
         currentLesson ? (
-          <div className="card bg-base-100 w-full max-w-none rounded-none sm:rounded-box shadow p-5 sm:p-6">
+          <div className="card bg-base-100 w-full max-w-none rounded-none sm:rounded-box shadow p-5 sm:p-6 relative">
             <h3 className="text-xl font-bold mb-2">Lesson #{currentLesson?.index} — {currentLesson?.title}</h3>
-            <p className="text-sm text-base-content/70 mb-2">{tip}</p>
             <h2 className="text-3xl font-extrabold mb-1">{target}</h2>
 
             <div className="flex items-center gap-2 mb-2">
@@ -630,10 +629,6 @@ export default function App() {
                 Thai: <span className="font-semibold">{thaiMap[target] || "—"}</span>
               </p>
             )}
-
-            <p className="text-sm text-gray-500 mb-4">
-              Tap Listen, then Start and speak—recording will auto-stop.
-            </p>
 
             <div className="flex gap-2 flex-wrap items-center">
               <button className="btn" onClick={() => speak(target)} disabled={ttsBusy || !target}>
@@ -683,6 +678,13 @@ export default function App() {
                 <button className="btn btn-success" disabled={!matchOk || !allDone} onClick={markSessionComplete}>
                   Finish session
                 </button>
+              </div>
+            </div>
+            {/* Tip box pinned to bottom-right of the practice card */}
+            <div className="pointer-events-auto absolute bottom-4 right-4 max-w-xs">
+              <div className="card bg-base-100 border border-base-300 shadow-sm px-3 py-2">
+                <div className="text-xs uppercase tracking-wide text-base-content/60 mb-1">Tip of the day</div>
+                <div className="text-sm text-base-content/80">{tip}</div>
               </div>
             </div>
           </div>
