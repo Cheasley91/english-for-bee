@@ -1,7 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { collection, doc, getDocs, setDoc } from "firebase/firestore";
 import { onAuthStateChanged } from "firebase/auth";
-import { auth, db, ensureAuth, loginEmail, registerEmail, logout } from "./lib/firebase";
+import { auth, db, ensureAuth, logout } from "./lib/firebase";
 import {
   loadHashes,
   upsertVocab,
@@ -73,8 +74,9 @@ function rootMeanSquare(buf) {
 
 /** ---------- MAIN APP ---------- **/
 export default function App() {
+  const navigate = useNavigate();
   // routing
-  const [view, setView] = useState("login");
+  const [view, setView] = useState("home");
 
   // profile progress
   const [profile, setProfile] = useState(DEFAULT_PROFILE);
@@ -92,9 +94,6 @@ export default function App() {
   // dynamic lesson state (replaces hard-coded lists at runtime)
   const [prompts, setPrompts] = useState([]); // English words/phrases
   const [thaiMap, setThaiMap] = useState({}); // { en: th }
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [authError, setAuthError] = useState("");
   const [lessonLoading, setLessonLoading] = useState(false);
   const [genStatus, setGenStatus] = useState("");
 
@@ -162,34 +161,11 @@ export default function App() {
           setCurrentLesson(null);
         }
         setView("home");
-      } else {
-        setProfile(DEFAULT_PROFILE);
-        setVocab(loadVocab());
-        setKnownHashes(new Set());
-        setCurrentLesson(null);
-        setView("login");
       }
     });
     return () => unsub();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  async function handleLogin() {
-    try {
-      await loginEmail(email, password);
-    } catch (e) {
-      setAuthError(e.message);
-    }
-  }
-
-  async function handleRegister() {
-    try {
-      await registerEmail(email, password);
-    } catch (e) {
-      setAuthError(e.message);
-    }
-  }
-
   async function handleLogout() {
     try {
       await logout();
@@ -198,6 +174,7 @@ export default function App() {
     }
     localStorage.clear();
     resetPractice();
+    navigate("/login");
   }
 
   /** ---------- TTS (OpenAI via /api/tts) with fallback ---------- **/
@@ -513,10 +490,9 @@ export default function App() {
   return (
     <div className="min-h-screen bg-base-200 p-0 sm:p-6">
       {/* Navbar */}
-      {view !== "login" && view !== "register" && (
-        <div className="navbar bg-base-100 rounded-none sm:rounded-box shadow mb-6">
-          <div className="flex-1 px-2 text-xl font-bold">🐝 English for Bee</div>
-          <div className="flex-none flex items-center gap-2">
+      <div className="navbar bg-base-100 rounded-none sm:rounded-box shadow mb-6">
+        <div className="flex-1 px-2 text-xl font-bold">🐝 English for Bee</div>
+        <div className="flex-none flex items-center gap-2">
             <label className="label cursor-pointer gap-2">
               <span className="label-text">Voice</span>
               <select
@@ -551,59 +527,8 @@ export default function App() {
             <button className="btn btn-ghost" onClick={handleLogout}>Logout</button>
           </div>
         </div>
-      )}
 
       {/* Views */}
-      {view === "login" && (
-        <div className="card bg-base-100 w-full max-w-sm mx-auto shadow p-6">
-          <h2 className="text-2xl font-bold mb-2">Sign in</h2>
-          <input
-            type="email"
-            placeholder="Email"
-            className="input input-bordered w-full mb-2"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-          />
-          <input
-            type="password"
-            placeholder="Password"
-            className="input input-bordered w-full mb-2"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-          />
-          {authError && <p className="text-error text-sm mb-2">{authError}</p>}
-          <div className="flex flex-col gap-2">
-            <button className="btn btn-primary" onClick={handleLogin}>Login</button>
-            <button className="btn" onClick={() => { setAuthError(""); setView("register"); }}>Register</button>
-          </div>
-        </div>
-      )}
-
-      {view === "register" && (
-        <div className="card bg-base-100 w-full max-w-sm mx-auto shadow p-6">
-          <h2 className="text-2xl font-bold mb-2">Register</h2>
-          <input
-            type="email"
-            placeholder="Email"
-            className="input input-bordered w-full mb-2"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-          />
-          <input
-            type="password"
-            placeholder="Password"
-            className="input input-bordered w-full mb-2"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-          />
-          {authError && <p className="text-error text-sm mb-2">{authError}</p>}
-          <div className="flex flex-col gap-2">
-            <button className="btn btn-primary" onClick={handleRegister}>Create account</button>
-            <button className="btn" onClick={() => { setAuthError(""); setView("login"); }}>Back to login</button>
-          </div>
-        </div>
-      )}
-
       {view === "home" && (
         <div className="w-full">
           {/* Hero */}
