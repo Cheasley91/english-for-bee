@@ -109,6 +109,9 @@ export default function App() {
   const [thaiMap, setThaiMap] = useState({}); // { en: th }
   const [lessonLoading, setLessonLoading] = useState(false);
   const [genStatus, setGenStatus] = useState("");
+  const [nextStatus, setNextStatus] = useState("idle");
+  const [nextLessonId, setNextLessonId] = useState(null);
+  const [lastCompletion, setLastCompletion] = useState(null);
 
   // practice state
   const [idx, setIdx] = useState(0);
@@ -276,14 +279,33 @@ export default function App() {
       saveLessonProgress(lesson.id, { completedIndices: [], lastIdx: 0 });
       const p = await getProfile({ db, uid });
       setProfile(p);
+      setLessonLoading(false);
+      return lesson;
     } catch (e) {
       console.error("new-lesson error:", e);
       setGenStatus("Try again.");
       setLessonLoading(false);
-      return false;
+      return null;
     }
-    setLessonLoading(false);
-    return true;
+  }
+
+  async function retryNextLesson() {
+    setNextStatus("pending");
+    const lesson = await startNextLesson();
+    if (lesson) {
+      setNextStatus("ready");
+      setNextLessonId(lesson.id);
+    } else {
+      setNextStatus("error");
+    }
+  }
+
+  function beginNextLesson() {
+    if (currentLesson && currentLesson.id === nextLessonId) {
+      prepareLesson(currentLesson);
+      setIdx(0);
+      setView("practice");
+    }
   }
 
   async function handleOpenLesson(lesson) {
@@ -554,17 +576,31 @@ export default function App() {
     const u = await ensureAuth().catch(() => null);
     const uid = u?.uid || "local";
     if (currentLesson) {
-      await finishLessonAndAward(currentLesson, { db, uid });
+      const prevLevel = profile.level || 1;
+      const completed = currentLesson;
+      const { awardedXp } = await finishLessonAndAward(currentLesson, { db, uid });
       clearLessonProgress(currentLesson.id);
       const p = await getProfile({ db, uid });
       setProfile(p);
       knownHashes.add(currentLesson.fingerprint);
       setKnownHashes(new Set(knownHashes));
-      await startNextLesson();
+      setLastCompletion({ lesson: completed, xp: awardedXp, leveledUp: p.level > prevLevel });
+      setCurrentLesson(null);
       setCompletedIndices([]);
+      setPrompts([]);
+      setThaiMap({});
     }
 
-    setView("practice");
+    setView("congrats");
+    setNextStatus("pending");
+    startNextLesson().then((lesson) => {
+      if (lesson) {
+        setNextStatus("ready");
+        setNextLessonId(lesson.id);
+      } else {
+        setNextStatus("error");
+      }
+    });
   }
 
   /** ---------- RENDER ---------- **/
@@ -766,6 +802,51 @@ export default function App() {
             </button>
           </div>
         )
+      )}
+
+      {view === "congrats" && (
+        <div className="card bg-base-100 w-full rounded-none sm:rounded-box shadow p-5 sm:p-6 text-center">
+          <h2 className="text-2xl font-bold mb-2">Great job!</h2>
+          {lastCompletion?.lesson && (
+            <p className="mb-2 break-words">
+              Lesson #{lastCompletion.lesson.index} — {lastCompletion.lesson.title}
+            </p>
+          )}
+          <div className="mb-4 space-y-1 text-sm">
+            <p>XP gained: {lastCompletion?.xp || 0}</p>
+            <p>
+              Level: {profile.level}
+              {lastCompletion?.leveledUp ? " 🎉" : ""}
+            </p>
+            <p>Streak: {profile.streakCount || 0} 🔥</p>
+          </div>
+          {nextStatus === "pending" && (
+            <div className="flex items-center justify-center gap-2 mb-4 text-sm text-base-content/70">
+              <span className="loading loading-spinner loading-sm"></span>
+              <span>Preparing your next lesson…</span>
+            </div>
+          )}
+          {nextStatus === "error" && (
+            <p className="text-sm text-error mb-2">Could not prepare next lesson.</p>
+          )}
+          <button
+            className="btn btn-primary w-full mb-2"
+            disabled={nextStatus !== "ready"}
+            onClick={beginNextLesson}
+          >
+            {nextStatus === "ready" ? "Start next lesson" : (
+              <span className="loading loading-spinner"></span>
+            )}
+          </button>
+          {nextStatus === "error" && (
+            <button className="btn btn-secondary w-full mb-2" onClick={retryNextLesson}>
+              Retry
+            </button>
+          )}
+          <button className="btn btn-ghost w-full" onClick={() => setView("home")}>
+            Go Home
+          </button>
+        </div>
       )}
       </div>
     </div>
