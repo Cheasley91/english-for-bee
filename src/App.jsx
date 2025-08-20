@@ -20,6 +20,7 @@ import {
 import { tipOfTheDay } from "./lib/tips";
 import Lessons from "./pages/Lessons";
 import { computeLevel } from "./lib/progress";
+import stringSimilarity from "string-similarity";
 // Valid OpenAI TTS voices for `tts-1`
 const VALID_VOICES = ["alloy", "ash", "ballad", "coral", "echo", "fable", "onyx", "nova", "sage", "shimmer", "verse"];
 const DEFAULT_VOICE = "alloy";
@@ -33,6 +34,8 @@ const VAD = {
   factor: 4.0,     // speech if RMS > baseline * factor
   hpHz: 120,       // high-pass cutoff
 };
+
+const SIMILARITY_THRESHOLD = 0.8;
 
 const DEFAULT_PROFILE = {
   xp: 0,
@@ -141,7 +144,8 @@ export default function App() {
 
   // derived
   const target = prompts[idx];
-  const matchOk = norm(heard) === norm(target);
+  const similarity = stringSimilarity.compareTwoStrings(norm(heard), norm(target));
+  const matchOk = similarity >= SIMILARITY_THRESHOLD;
   const allCompleted = completedIndices.length === prompts.length;
   const currentCompleted = completedIndices.includes(idx);
   const tip = tipOfTheDay();
