@@ -368,6 +368,7 @@ export async function getProfile({ db, uid }) {
       lessonsCompleted: 0,
       nextIndex: 1,
       activeLessonId: null,
+      lessonPrefs: { category: "routines" },
       createdAt: 0,
       updatedAt: 0,
     },
@@ -403,11 +404,11 @@ export async function getActiveLesson({ db, uid }) {
   return getLesson(prof.activeLessonId, { db, uid });
 }
 
-export async function createLessonFromApi({ db, uid, index, meta = {} }) {
+export async function createLessonFromApi({ db, uid, index, category = "routines" }) {
   const resp = await fetch("/api/new-lesson", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ level: meta.level, topic: meta.topic }),
+    body: JSON.stringify({ category }),
   });
   if (!resp.ok) throw new Error("lesson fetch failed");
   const data = await resp.json();
@@ -416,32 +417,33 @@ export async function createLessonFromApi({ db, uid, index, meta = {} }) {
   const seen = new Set();
   const filtered = [];
   for (const it of items) {
-    const term = typeof it.term === "string" ? it.term.trim() : "";
+    const term = typeof it.en === "string" ? it.en.trim() : typeof it.term === "string" ? it.term.trim() : "";
     if (!term) continue;
+    const thai = typeof it.th === "string" ? it.th.trim() : it.thai || "";
     const norm = term.toLowerCase();
     if (seen.has(norm)) continue;
     seen.add(norm);
-    filtered.push({ type: "sentence", term, thai: it.thai || "" });
+    filtered.push({ type: "sentence", term, thai, fingerprint: it.fingerprint });
   }
   if (filtered.length < 10) {
     const fallback = [
-      { type: "sentence", term: "I like to walk in the park.", thai: "" },
-      { type: "sentence", term: "What time is it right now?", thai: "" },
-      { type: "sentence", term: "She drinks coffee every morning.", thai: "" },
-      { type: "sentence", term: "Can you help me with this?", thai: "" },
-      { type: "sentence", term: "We are going to the beach.", thai: "" },
-      { type: "sentence", term: "He reads a book every night.", thai: "" },
-      { type: "sentence", term: "Please close the window, it's cold.", thai: "" },
-      { type: "sentence", term: "They will arrive in ten minutes.", thai: "" },
-      { type: "sentence", term: "Do you want to join us?", thai: "" },
-      { type: "sentence", term: "This restaurant serves delicious food.", thai: "" },
+      { term: "I like to walk in the park." },
+      { term: "What time is it right now?" },
+      { term: "She drinks coffee every morning." },
+      { term: "Can you help me with this?" },
+      { term: "We are going to the beach." },
+      { term: "He reads a book every night." },
+      { term: "Please close the window, it's cold." },
+      { term: "They will arrive in ten minutes." },
+      { term: "Do you want to join us?" },
+      { term: "This restaurant serves delicious food." },
     ];
     for (const f of fallback) {
       if (filtered.length >= 10) break;
       const norm = f.term.toLowerCase();
       if (seen.has(norm)) continue;
       seen.add(norm);
-      filtered.push(f);
+      filtered.push({ type: "sentence", term: f.term, thai: "", fingerprint: fingerprint(norm) });
     }
   }
   lesson.items = backfillThai(filtered.slice(0, 10));
@@ -449,6 +451,7 @@ export async function createLessonFromApi({ db, uid, index, meta = {} }) {
   const docData = {
     index,
     title: lesson.title || "Lesson",
+    category: lesson.meta?.category || category,
     items: lesson.items,
     itemsCount: 10,
     fingerprint: lesson.fingerprint,
