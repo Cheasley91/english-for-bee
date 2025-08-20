@@ -13,6 +13,9 @@ import {
   setActiveLesson,
   createLessonFromApi,
   finishLessonAndAward,
+  loadLessonProgress,
+  saveLessonProgress,
+  clearLessonProgress,
 } from "./lib/storage";
 import { tipOfTheDay } from "./lib/tips";
 import Lessons from "./pages/Lessons";
@@ -72,6 +75,13 @@ function rootMeanSquare(buf) {
   return Math.sqrt(sum / buf.length);
 }
 
+function firstIncomplete(arr = []) {
+  for (let i = 0; i < 10; i++) {
+    if (!arr.includes(i)) return i;
+  }
+  return 9;
+}
+
 /** ---------- MAIN APP ---------- **/
 export default function App() {
   const navigate = useNavigate();
@@ -101,6 +111,7 @@ export default function App() {
   const [idx, setIdx] = useState(0);
   const [heard, setHeard] = useState("");
   const [showThai, setShowThai] = useState(false);
+  const [completedIndices, setCompletedIndices] = useState([]);
 
   // TTS state
   const [voice, setVoice] = useState(DEFAULT_VOICE);
@@ -130,8 +141,9 @@ export default function App() {
 
   // derived
   const target = prompts[idx];
-  const allDone = idx >= prompts.length - 1;
   const matchOk = norm(heard) === norm(target);
+  const allCompleted = completedIndices.length === prompts.length;
+  const currentCompleted = completedIndices.includes(idx);
   const tip = tipOfTheDay();
 
   // cleanup on unmount
@@ -157,6 +169,12 @@ export default function App() {
         if (active) {
           setCurrentLesson(active);
           prepareLesson(active);
+          const prog = loadLessonProgress(active.id);
+          const done = Array.isArray(prog.completedIndices) ? prog.completedIndices : [];
+          setCompletedIndices(done);
+          const fi = firstIncomplete(done);
+          setIdx(fi);
+          saveLessonProgress(active.id, { completedIndices: done, lastIdx: fi });
         } else {
           setCurrentLesson(null);
         }
@@ -164,8 +182,18 @@ export default function App() {
       }
     });
     return () => unsub();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (view === "practice" && currentLesson) {
+      const fi = firstIncomplete(completedIndices);
+      setIdx(fi);
+      saveLessonProgress(currentLesson.id, { completedIndices, lastIdx: fi });
+      setHeard("");
+      setShowThai(false);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, currentLesson]);
   async function handleLogout() {
     try {
       await logout();
@@ -213,15 +241,9 @@ export default function App() {
 
   /** ---------- Lesson helpers ---------- **/
   function prepareLesson(lesson) {
-    let nextPrompts = Array.isArray(lesson.items)
+    const nextPrompts = Array.isArray(lesson.items)
       ? lesson.items.filter((i) => i.type !== "text" && i.term).map((i) => i.term)
       : [];
-    const now = Date.now();
-    const dueTerms = Object.values(vocab)
-      .filter((v) => v.nextReviewAt && v.nextReviewAt <= now)
-      .map((v) => v.term);
-    const mixCount = Math.min(dueTerms.length, Math.round(nextPrompts.length * 0.3));
-    nextPrompts = [...dueTerms.slice(0, mixCount), ...nextPrompts].slice(0, nextPrompts.length);
     const baseThai = {};
     lesson.items.forEach((i) => {
       if (i.type !== "text" && i.term) baseThai[i.term] = i.thai || "";
@@ -246,6 +268,8 @@ export default function App() {
       await updateProfile({ nextIndex: prof.nextIndex + 1 }, { db, uid });
       setCurrentLesson(lesson);
       prepareLesson(lesson);
+      setCompletedIndices([]);
+      saveLessonProgress(lesson.id, { completedIndices: [], lastIdx: 0 });
       const p = await getProfile({ db, uid });
       setProfile(p);
     } catch (e) {
@@ -261,6 +285,12 @@ export default function App() {
   async function handleOpenLesson(lesson) {
     prepareLesson(lesson);
     setCurrentLesson(lesson);
+    const prog = loadLessonProgress(lesson.id);
+    const done = Array.isArray(prog.completedIndices) ? prog.completedIndices : [];
+    setCompletedIndices(done);
+    const fi = firstIncomplete(done);
+    setIdx(fi);
+    saveLessonProgress(lesson.id, { completedIndices: done, lastIdx: fi });
     setView("practice");
   }
 
@@ -451,20 +481,36 @@ export default function App() {
   /** ---------- MATCH / NAV ---------- **/
   const prevPrompt = useCallback(() => {
     if (idx > 0) {
+      const ni = Math.max(0, idx - 1);
       setHeard("");
       setShowThai(false);
-      setIdx((i) => Math.max(0, i - 1));
+      setIdx(ni);
+      if (currentLesson) {
+        saveLessonProgress(currentLesson.id, { completedIndices, lastIdx: ni });
+      }
     }
-  }, [idx]);
+  }, [idx, currentLesson, completedIndices]);
 
   function nextPrompt() {
-    if (!matchOk) return alert("Try saying it again, then try again.");
+    if (idx >= prompts.length - 1) return;
+    const ni = Math.min(prompts.length - 1, idx + 1);
+    setHeard("");
+    setShowThai(false);
+    setIdx(ni);
+    if (currentLesson) {
+      saveLessonProgress(currentLesson.id, { completedIndices, lastIdx: ni });
+    }
+  }
+
+  function skipPrompt() {
     const term = prompts[idx];
-    updateVocab(term, true);
-    if (idx < prompts.length - 1) {
-      setHeard("");
-      setShowThai(false);
-      setIdx((i) => i + 1);
+    updateVocab(term, false);
+    const ni = Math.min(prompts.length - 1, idx + 1);
+    setHeard("");
+    setShowThai(false);
+    setIdx(ni);
+    if (currentLesson) {
+      saveLessonProgress(currentLesson.id, { completedIndices, lastIdx: ni });
     }
   }
 
@@ -472,7 +518,19 @@ export default function App() {
     setHeard("");
     setShowThai(false);
     setIdx(0);
+    setCompletedIndices([]);
   }
+
+  useEffect(() => {
+    if (matchOk && currentLesson && !completedIndices.includes(idx)) {
+      const updated = [...completedIndices, idx].sort((a, b) => a - b);
+      setCompletedIndices(updated);
+      saveLessonProgress(currentLesson.id, { completedIndices: updated, lastIdx: idx });
+      const term = prompts[idx];
+      updateVocab(term, true);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [matchOk, idx, currentLesson]);
 
   useEffect(() => {
     function handleKey(e) {
@@ -485,22 +543,23 @@ export default function App() {
   }, [view, prevPrompt]);
 
   async function markSessionComplete() {
-    if (!matchOk) return alert("Say the last prompt correctly first, then Finish.");
-    const term = prompts[idx];
-    updateVocab(term, true);
+    if (completedIndices.length !== prompts.length) {
+      return alert("Complete all prompts first.");
+    }
 
     const u = await ensureAuth().catch(() => null);
     const uid = u?.uid || "local";
     if (currentLesson) {
       await finishLessonAndAward(currentLesson, { db, uid });
+      clearLessonProgress(currentLesson.id);
       const p = await getProfile({ db, uid });
       setProfile(p);
       knownHashes.add(currentLesson.fingerprint);
       setKnownHashes(new Set(knownHashes));
       await startNextLesson();
+      setCompletedIndices([]);
     }
 
-    resetPractice();
     setView("practice");
   }
 
@@ -533,7 +592,7 @@ export default function App() {
               </button>
               <button
                 className={`btn btn-ghost btn-sm sm:btn-md ${view === "practice" ? "btn-active" : ""}`}
-                onClick={() => { resetPractice(); setView("practice"); }}
+                onClick={() => setView("practice")}
               >
                 Practice
               </button>
@@ -649,13 +708,7 @@ export default function App() {
               </button>
               <button
                 className="btn btn-secondary w-full sm:w-auto"
-                onClick={() => {
-                  const term = prompts[idx];
-                  updateVocab(term, false);
-                  setHeard("");
-                  setShowThai(false);
-                  setIdx((i) => (i + 1) % prompts.length);
-                }}
+                onClick={skipPrompt}
               >
                 Skip
               </button>
@@ -674,10 +727,18 @@ export default function App() {
 
               <div className="mt-3 sm:flex sm:items-start sm:gap-4">
                 <div className="grid grid-cols-2 gap-2 sm:flex sm:gap-2">
-                  <button className="btn btn-primary w-full sm:w-auto" disabled={!matchOk || allDone} onClick={nextPrompt}>
+                  <button
+                    className="btn btn-primary w-full sm:w-auto"
+                    disabled={!(currentCompleted || matchOk) || idx >= prompts.length - 1}
+                    onClick={nextPrompt}
+                  >
                     Next
                   </button>
-                  <button className="btn btn-success w-full sm:w-auto" disabled={!matchOk || !allDone} onClick={markSessionComplete}>
+                  <button
+                    className="btn btn-success w-full sm:w-auto"
+                    disabled={!allCompleted}
+                    onClick={markSessionComplete}
+                  >
                     Finish session
                   </button>
                 </div>

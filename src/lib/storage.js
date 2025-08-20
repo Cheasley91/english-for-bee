@@ -139,6 +139,41 @@ export async function saveProgress(p) {
   }
 }
 
+const LESSON_PROGRESS_PREFIX = "efb_lp_";
+
+export function loadLessonProgress(lessonId) {
+  if (!lessonId) return { completedIndices: [], lastIdx: 0 };
+  try {
+    const raw = localStorage.getItem(LESSON_PROGRESS_PREFIX + lessonId);
+    if (!raw) return { completedIndices: [], lastIdx: 0 };
+    const obj = JSON.parse(raw);
+    return {
+      completedIndices: Array.isArray(obj.completedIndices) ? obj.completedIndices : [],
+      lastIdx: typeof obj.lastIdx === "number" ? obj.lastIdx : 0,
+    };
+  } catch {
+    return { completedIndices: [], lastIdx: 0 };
+  }
+}
+
+export function saveLessonProgress(lessonId, prog) {
+  if (!lessonId) return;
+  try {
+    localStorage.setItem(LESSON_PROGRESS_PREFIX + lessonId, JSON.stringify(prog));
+  } catch {
+    /* ignore */
+  }
+}
+
+export function clearLessonProgress(lessonId) {
+  if (!lessonId) return;
+  try {
+    localStorage.removeItem(LESSON_PROGRESS_PREFIX + lessonId);
+  } catch {
+    /* ignore */
+  }
+}
+
 export function upsertVocab(term, correct, existing = {}) {
   const entry = {
     term,
