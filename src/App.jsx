@@ -103,7 +103,7 @@ export default function App() {
 
   // profile progress
   const [profile, setProfile] = useState(DEFAULT_PROFILE);
-  const [category, setCategory] = useState(DEFAULT_PROFILE.lessonPrefs.category);
+  const [nextCategory, setNextCategory] = useState("");
 
   // spaced vocab stats
   const [vocab, setVocab] = useState(loadVocab);
@@ -118,10 +118,10 @@ export default function App() {
   // dynamic lesson state (replaces hard-coded lists at runtime)
   const [prompts, setPrompts] = useState([]); // English words/phrases
   const [thaiMap, setThaiMap] = useState({}); // { en: th }
-  const [lessonLoading, setLessonLoading] = useState(false);
   const [genStatus, setGenStatus] = useState("");
   const [nextStatus, setNextStatus] = useState("idle");
   const [nextLessonId, setNextLessonId] = useState(null);
+  const [errorMsg, setErrorMsg] = useState("");
   const [lastCompletion, setLastCompletion] = useState(null);
 
   // practice state
@@ -177,7 +177,6 @@ export default function App() {
       if (u) {
         const p = await getProfile({ db, uid: u.uid });
         setProfile(p);
-        setCategory(p.lessonPrefs?.category || "routines");
         const vSnap = await getDocs(collection(db, `users/${u.uid}/vocab`));
         const vv = {};
         vSnap.forEach((d) => (vv[d.id] = d.data()));
@@ -275,52 +274,43 @@ export default function App() {
     setShowThai(false);
   }
 
-  async function startNextLesson() {
-    setLessonLoading(true);
+  async function createNextLesson(cat) {
     setGenStatus("");
     try {
       const u = await ensureAuth().catch(() => null);
       const uid = u?.uid || "local";
       const prof = await getProfile({ db, uid });
-      const lesson = await createLessonFromApi({ db, uid, index: prof.nextIndex, category });
+      const lesson = await createLessonFromApi({ db, uid, index: prof.nextIndex, category: cat });
       await setActiveLesson(lesson.id, { db, uid });
-      await updateProfile({ nextIndex: prof.nextIndex + 1 }, { db, uid });
+      await updateProfile(
+        { nextIndex: prof.nextIndex + 1, lessonPrefs: { ...(prof.lessonPrefs || {}), category: cat } },
+        { db, uid }
+      );
       setCurrentLesson(lesson);
       prepareLesson(lesson);
       setCompletedIndices([]);
       saveLessonProgress(lesson.id, { completedIndices: [], lastIdx: 0 });
       const p = await getProfile({ db, uid });
       setProfile(p);
-      setLessonLoading(false);
       return lesson;
     } catch (e) {
       console.error("new-lesson error:", e);
       setGenStatus("Try again.");
-      setLessonLoading(false);
       return null;
     }
   }
 
-  async function handleCategoryChange(e) {
-    const val = e.target.value;
-    setCategory(val);
-    const u = auth.currentUser;
-    const uid = u?.uid || "local";
-    await updateProfile(
-      { lessonPrefs: { ...(profile.lessonPrefs || {}), category: val } },
-      { db, uid }
-    );
-    setProfile((prev) => ({ ...prev, lessonPrefs: { ...(prev.lessonPrefs || {}), category: val } }));
-  }
-
-  async function retryNextLesson() {
+  async function handleCreateNextLesson() {
+    if (!nextCategory) return;
     setNextStatus("pending");
-    const lesson = await startNextLesson();
+    setErrorMsg("");
+    const lesson = await createNextLesson(nextCategory);
     if (lesson) {
       setNextStatus("ready");
       setNextLessonId(lesson.id);
     } else {
       setNextStatus("error");
+      setErrorMsg("Could not prepare next lesson.");
     }
   }
 
@@ -328,6 +318,8 @@ export default function App() {
     if (currentLesson && currentLesson.id === nextLessonId) {
       prepareLesson(currentLesson);
       setIdx(0);
+      setNextStatus("idle");
+      setNextLessonId(null);
       setView("practice");
     }
   }
@@ -616,15 +608,10 @@ export default function App() {
     }
 
     setView("congrats");
-    setNextStatus("pending");
-    startNextLesson().then((lesson) => {
-      if (lesson) {
-        setNextStatus("ready");
-        setNextLessonId(lesson.id);
-      } else {
-        setNextStatus("error");
-      }
-    });
+    setNextStatus("idle");
+    setNextLessonId(null);
+    setNextCategory("");
+    setErrorMsg("");
   }
 
   /** ---------- RENDER ---------- **/
@@ -678,30 +665,49 @@ export default function App() {
             <div className="hero-content w-full flex-col items-center text-center gap-2">
               <h1 className="text-3xl font-extrabold">Hi Bee 👋</h1>
               <p className="text-base-content/70">Practice a little each day. Small steps, big progress.</p>
-              <select
-                className="select select-bordered w-full sm:max-w-xs mb-2"
-                value={category}
-                onChange={handleCategoryChange}
-              >
-                {CATEGORIES.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.label}
-                  </option>
-                ))}
-              </select>
-              <div className="flex gap-2">
-                {currentLesson ? (
-                  <button className="btn btn-primary" onClick={() => setView("practice")}>Continue practice</button>
-                ) : (
-                  <button
-                    className={`btn ${lessonLoading ? "btn-disabled" : "btn-primary"}`}
-                    onClick={async () => { await startNextLesson(); setView("practice"); }}
-                    disabled={lessonLoading}
-                  >
-                    {lessonLoading ? "Loading…" : "Start next lesson"}
+              {currentLesson ? (
+                nextStatus === "ready" && currentLesson.id === nextLessonId ? (
+                  <button className="btn btn-primary" onClick={beginNextLesson}>
+                    Start lesson
                   </button>
-                )}
-              </div>
+                ) : (
+                  <button className="btn btn-primary" onClick={() => setView("practice")}>Continue practice</button>
+                )
+              ) : (
+                <>
+                  <select
+                    className="select select-bordered w-full sm:max-w-xs mb-2"
+                    value={nextCategory}
+                    onChange={(e) => setNextCategory(e.target.value)}
+                  >
+                    <option value="" disabled>
+                      Please select a lesson type…
+                    </option>
+                    {CATEGORIES.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.label}
+                      </option>
+                    ))}
+                  </select>
+                  {nextStatus !== "ready" && (
+                    <button
+                      className={`btn w-full sm:max-w-xs ${!nextCategory || nextStatus === "pending" ? "btn-disabled" : "btn-primary"}`}
+                      onClick={handleCreateNextLesson}
+                      disabled={!nextCategory || nextStatus === "pending"}
+                    >
+                      {nextStatus === "pending" ? "Creating…" : "Create next lesson"}
+                    </button>
+                  )}
+                  {nextStatus === "ready" && (
+                    <button className="btn btn-primary w-full sm:max-w-xs" onClick={beginNextLesson}>
+                      Start lesson
+                    </button>
+                  )}
+                  {nextStatus === "error" && (
+                    <p className="text-sm text-error mt-2">{errorMsg}</p>
+                  )}
+                </>
+              )}
               {genStatus && <p className="text-sm text-warning mt-2">{genStatus}</p>}
             </div>
           </div>
@@ -828,13 +834,37 @@ export default function App() {
         ) : (
           <div className="card bg-base-100 w-full rounded-none sm:rounded-box shadow p-5 sm:p-6 text-center">
             <p className="mb-4">No active lesson.</p>
-            <button
-              className={`btn ${lessonLoading ? "btn-disabled" : "btn-primary"}`}
-              onClick={startNextLesson}
-              disabled={lessonLoading}
+            <select
+              className="select select-bordered w-full mb-4"
+              value={nextCategory}
+              onChange={(e) => setNextCategory(e.target.value)}
             >
-              {lessonLoading ? "Loading…" : "Start next lesson"}
-            </button>
+              <option value="" disabled>
+                Please select a lesson type…
+              </option>
+              {CATEGORIES.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.label}
+                </option>
+              ))}
+            </select>
+            {nextStatus !== "ready" && (
+              <button
+                className={`btn w-full ${!nextCategory || nextStatus === "pending" ? "btn-disabled" : "btn-primary"}`}
+                onClick={handleCreateNextLesson}
+                disabled={!nextCategory || nextStatus === "pending"}
+              >
+                {nextStatus === "pending" ? "Creating…" : "Create next lesson"}
+              </button>
+            )}
+            {nextStatus === "ready" && (
+              <button className="btn btn-primary w-full" onClick={beginNextLesson}>
+                Start lesson
+              </button>
+            )}
+            {nextStatus === "error" && (
+              <p className="text-sm text-error mt-2">{errorMsg}</p>
+            )}
           </div>
         )
       )}
@@ -855,32 +885,38 @@ export default function App() {
             </p>
             <p>Streak: {profile.streakCount || 0} 🔥</p>
           </div>
-          {nextStatus === "pending" && (
-            <div className="flex items-center justify-center gap-2 mb-4 text-sm text-base-content/70">
-              <span className="loading loading-spinner loading-sm"></span>
-              <span>Preparing your next lesson…</span>
-            </div>
-          )}
-          {nextStatus === "error" && (
-            <p className="text-sm text-error mb-2">Could not prepare next lesson.</p>
-          )}
-          <button
-            className="btn btn-primary w-full mb-2"
-            disabled={nextStatus !== "ready"}
-            onClick={beginNextLesson}
+          <select
+            className="select select-bordered w-full mb-4"
+            value={nextCategory}
+            onChange={(e) => setNextCategory(e.target.value)}
           >
-            {nextStatus === "ready" ? "Start next lesson" : (
-              <span className="loading loading-spinner"></span>
-            )}
-          </button>
-          {nextStatus === "error" && (
-            <button className="btn btn-secondary w-full mb-2" onClick={retryNextLesson}>
-              Retry
+            <option value="" disabled>
+              Please select a lesson type…
+            </option>
+            {CATEGORIES.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.label}
+              </option>
+            ))}
+          </select>
+          {nextStatus !== "ready" && (
+            <button
+              className={`btn w-full mb-2 ${!nextCategory || nextStatus === "pending" ? "btn-disabled" : "btn-primary"}`}
+              onClick={handleCreateNextLesson}
+              disabled={!nextCategory || nextStatus === "pending"}
+            >
+              {nextStatus === "pending" ? "Creating…" : "Create next lesson"}
             </button>
           )}
-          <button className="btn btn-ghost w-full" onClick={() => setView("home")}>
-            Go Home
-          </button>
+          {nextStatus === "ready" && (
+            <button className="btn btn-primary w-full mb-2" onClick={beginNextLesson}>
+              Start lesson
+            </button>
+          )}
+          {nextStatus === "error" && (
+            <p className="text-sm text-error mb-2">{errorMsg}</p>
+          )}
+          <button className="btn btn-ghost w-full" onClick={() => setView("home")}>Go Home</button>
         </div>
       )}
       </div>
