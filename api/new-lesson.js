@@ -23,7 +23,8 @@ function normalizeLesson(lesson) {
     for (const it of lesson.items) {
       if (!it) continue;
       if (it.type === "text" && it.content) acc.push(String(it.content));
-      if ((it.type === "word" || it.type === "phrase") && it.term) acc.push(String(it.term));
+      if ((it.type === "word" || it.type === "phrase" || it.type === "sentence") && it.term)
+        acc.push(String(it.term));
     }
   }
   if (lesson.meta) {
@@ -53,11 +54,15 @@ function parseItems(arr) {
     if (!it) continue;
     if (typeof it === "string") {
       const term = it.trim();
-      if (term) out.push({ type: "word", term });
+      if (term) out.push({ type: "sentence", term });
       continue;
     }
     if (typeof it !== "object") continue;
-    if ((it.type === "word" || it.type === "phrase") && typeof it.term === "string" && it.term.trim()) {
+    if (
+      (it.type === "word" || it.type === "phrase" || it.type === "sentence") &&
+      typeof it.term === "string" &&
+      it.term.trim()
+    ) {
       const obj = { type: it.type, term: it.term.trim() };
       if (typeof it.thai === "string" && it.thai.trim()) obj.thai = it.thai.trim();
       out.push(obj);
@@ -66,7 +71,7 @@ function parseItems(arr) {
       if (typeof it.thai === "string" && it.thai.trim()) obj.thai = it.thai.trim();
       out.push(obj);
     } else if (typeof it.term === "string" && it.term.trim()) {
-      const obj = { type: "word", term: it.term.trim() };
+      const obj = { type: "sentence", term: it.term.trim() };
       if (typeof it.thai === "string" && it.thai.trim()) obj.thai = it.thai.trim();
       out.push(obj);
     }
@@ -87,9 +92,9 @@ export default async function handler(req, res) {
     return res.status(429).json({ error: "Daily limit exceeded (200/day)" });
   }
   try {
-    const { level = "beginner", topic = "daily life", avoidTerms = [] } = req.body ?? {};
+    const { level = "beginner", topic = "daily life" } = req.body ?? {};
 
-    async function callOpenAI(cnt) {
+    async function callOpenAI(cnt, avoid = []) {
       const ctl = new AbortController();
       const t = setTimeout(() => ctl.abort(new Error("timeout")), 25_000);
       const r = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -104,11 +109,11 @@ export default async function handler(req, res) {
             {
               role: "system",
               content:
-                "You generate compact ESL lessons for Thai learners. Respond with JSON only in the shape {title, items:[{type:'word'|'phrase'|'text', term?, content?, thai?}]}. Each word or phrase must include a basic Thai translation in the 'thai' field.",
+                "You generate compact ESL lessons for Thai learners. Respond with JSON only in the shape {title, items:[{type:'sentence', term, thai}]}. Each item is a unique English sentence or short conversational phrase of 5-10 words with a simple Thai translation in the 'thai' field. Mix statements, questions, and short phrases.",
             },
             {
               role: "user",
-              content: `Level: ${level}, Count: ${cnt}, Topic: ${topic}. Avoid terms: ${avoidTerms.join(", ")}.`,
+              content: `Level: ${level}, Count: ${cnt}, Topic: ${topic}. Avoid sentences: ${avoid.join(" | ")}.`,
             },
           ],
           temperature: 0.7,
@@ -138,42 +143,55 @@ export default async function handler(req, res) {
     }
 
     const desired = 10;
-    let first = await callOpenAI(20);
-    let title = first.title || "Lesson";
-    let items = first.items.slice(0, desired);
-    if (items.length < desired) {
-      const more = await callOpenAI(20);
-      items = [...items, ...more.items].slice(0, desired);
-      if (!title && more.title) title = more.title;
+    let title = "";
+    const items = [];
+    const seen = new Set();
+    for (let attempt = 0; attempt < 5 && items.length < desired; attempt++) {
+      const need = (desired - items.length) * 2;
+      const avoid = Array.from(seen);
+      const resp = await callOpenAI(need, avoid);
+      if (!title && resp.title) title = resp.title;
+      for (const it of resp.items) {
+        const term = typeof it.term === "string" ? it.term.trim() : "";
+        if (!term) continue;
+        const norm = term.toLowerCase();
+        const words = norm.split(/\s+/);
+        if (words.length < 5 || words.length > 10) continue;
+        if (seen.has(norm)) continue;
+        seen.add(norm);
+        items.push({ type: "sentence", term, thai: it.thai || "" });
+        if (items.length >= desired) break;
+      }
     }
     if (items.length < desired) {
       const fallback = [
-        { type: "word", term: "hello", thai: "สวัสดี" },
-        { type: "word", term: "thank you", thai: "ขอบคุณ" },
-        { type: "word", term: "please", thai: "กรุณา" },
-        { type: "word", term: "apple", thai: "แอปเปิล" },
-        { type: "word", term: "water", thai: "น้ำ" },
-        { type: "word", term: "coffee", thai: "กาแฟ" },
-        { type: "word", term: "book", thai: "หนังสือ" },
-        { type: "word", term: "bus", thai: "รถบัส" },
-        { type: "word", term: "market", thai: "ตลาด" },
-        { type: "word", term: "rice", thai: "ข้าว" },
+        { type: "sentence", term: "I like to walk in the park.", thai: "" },
+        { type: "sentence", term: "What time is it right now?", thai: "" },
+        { type: "sentence", term: "She drinks coffee every morning.", thai: "" },
+        { type: "sentence", term: "Can you help me with this?", thai: "" },
+        { type: "sentence", term: "We are going to the beach.", thai: "" },
+        { type: "sentence", term: "He reads a book every night.", thai: "" },
+        { type: "sentence", term: "Please close the window, it's cold.", thai: "" },
+        { type: "sentence", term: "They will arrive in ten minutes.", thai: "" },
+        { type: "sentence", term: "Do you want to join us?", thai: "" },
+        { type: "sentence", term: "This restaurant serves delicious food.", thai: "" },
       ];
       for (const f of fallback) {
         if (items.length >= desired) break;
+        const norm = f.term.toLowerCase();
+        if (seen.has(norm)) continue;
+        seen.add(norm);
         items.push(f);
       }
     }
 
     const lesson = {
-      title,
+      title: title || "Lesson",
       items: items.slice(0, desired),
       itemsCount: desired,
       meta: { level, topic },
     };
-    return res
-      .status(200)
-      .json({ lesson: { ...lesson, fingerprint: lessonFingerprint(lesson) } });
+    return res.status(200).json({ lesson: { ...lesson, fingerprint: lessonFingerprint(lesson) } });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ error: "Upstream error", status: 500 });

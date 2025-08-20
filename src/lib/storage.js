@@ -25,7 +25,8 @@ export function normalizeLesson(lesson) {
     for (const it of lesson.items) {
       if (!it) continue;
       if (it.type === "text" && it.content) acc.push(String(it.content));
-      if ((it.type === "word" || it.type === "phrase") && it.term) acc.push(String(it.term));
+      if ((it.type === "word" || it.type === "phrase" || it.type === "sentence") && it.term)
+        acc.push(String(it.term));
     }
   }
   if (lesson.meta) {
@@ -411,10 +412,39 @@ export async function createLessonFromApi({ db, uid, index, meta = {} }) {
   if (!resp.ok) throw new Error("lesson fetch failed");
   const data = await resp.json();
   let lesson = data.lesson || {};
-  lesson.items = backfillThai(Array.isArray(lesson.items) ? lesson.items.slice(0, 10) : []);
-  while (lesson.items.length < 10) {
-    lesson.items.push({ type: "word", term: `word${lesson.items.length + 1}`, thai: "" });
+  let items = Array.isArray(lesson.items) ? lesson.items.slice(0, 10) : [];
+  const seen = new Set();
+  const filtered = [];
+  for (const it of items) {
+    const term = typeof it.term === "string" ? it.term.trim() : "";
+    if (!term) continue;
+    const norm = term.toLowerCase();
+    if (seen.has(norm)) continue;
+    seen.add(norm);
+    filtered.push({ type: "sentence", term, thai: it.thai || "" });
   }
+  if (filtered.length < 10) {
+    const fallback = [
+      { type: "sentence", term: "I like to walk in the park.", thai: "" },
+      { type: "sentence", term: "What time is it right now?", thai: "" },
+      { type: "sentence", term: "She drinks coffee every morning.", thai: "" },
+      { type: "sentence", term: "Can you help me with this?", thai: "" },
+      { type: "sentence", term: "We are going to the beach.", thai: "" },
+      { type: "sentence", term: "He reads a book every night.", thai: "" },
+      { type: "sentence", term: "Please close the window, it's cold.", thai: "" },
+      { type: "sentence", term: "They will arrive in ten minutes.", thai: "" },
+      { type: "sentence", term: "Do you want to join us?", thai: "" },
+      { type: "sentence", term: "This restaurant serves delicious food.", thai: "" },
+    ];
+    for (const f of fallback) {
+      if (filtered.length >= 10) break;
+      const norm = f.term.toLowerCase();
+      if (seen.has(norm)) continue;
+      seen.add(norm);
+      filtered.push(f);
+    }
+  }
+  lesson.items = backfillThai(filtered.slice(0, 10));
   const id = Date.now().toString();
   const docData = {
     index,
