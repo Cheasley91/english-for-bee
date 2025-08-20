@@ -45,17 +45,7 @@ const DEFAULT_PROFILE = {
   lessonsCompleted: 0,
   nextIndex: 1,
   activeLessonId: null,
-  lessonPrefs: { category: "routines" },
 };
-
-const CATEGORIES = [
-  { id: "greetings", label: "Greetings & Small Talk" },
-  { id: "food", label: "Food & Shopping" },
-  { id: "travel", label: "Travel & Directions" },
-  { id: "family", label: "Family & Relationships" },
-  { id: "routines", label: "Daily Routines & Chores" },
-  { id: "work", label: "Work & Technology" },
-];
 
 /** ---------- PERSISTENCE ---------- **/
 const VOCAB_KEY = "efb_vocab_v1";
@@ -103,7 +93,6 @@ export default function App() {
 
   // profile progress
   const [profile, setProfile] = useState(DEFAULT_PROFILE);
-  const [category, setCategory] = useState(DEFAULT_PROFILE.lessonPrefs.category);
 
   // spaced vocab stats
   const [vocab, setVocab] = useState(loadVocab);
@@ -177,7 +166,6 @@ export default function App() {
       if (u) {
         const p = await getProfile({ db, uid: u.uid });
         setProfile(p);
-        setCategory(p.lessonPrefs?.category || "routines");
         const vSnap = await getDocs(collection(db, `users/${u.uid}/vocab`));
         const vv = {};
         vSnap.forEach((d) => (vv[d.id] = d.data()));
@@ -282,7 +270,7 @@ export default function App() {
       const u = await ensureAuth().catch(() => null);
       const uid = u?.uid || "local";
       const prof = await getProfile({ db, uid });
-      const lesson = await createLessonFromApi({ db, uid, index: prof.nextIndex, category });
+      const lesson = await createLessonFromApi({ db, uid, index: prof.nextIndex, meta: { level: "A1", topic: "daily life" } });
       await setActiveLesson(lesson.id, { db, uid });
       await updateProfile({ nextIndex: prof.nextIndex + 1 }, { db, uid });
       setCurrentLesson(lesson);
@@ -299,18 +287,6 @@ export default function App() {
       setLessonLoading(false);
       return null;
     }
-  }
-
-  async function handleCategoryChange(e) {
-    const val = e.target.value;
-    setCategory(val);
-    const u = auth.currentUser;
-    const uid = u?.uid || "local";
-    await updateProfile(
-      { lessonPrefs: { ...(profile.lessonPrefs || {}), category: val } },
-      { db, uid }
-    );
-    setProfile((prev) => ({ ...prev, lessonPrefs: { ...(prev.lessonPrefs || {}), category: val } }));
   }
 
   async function retryNextLesson() {
@@ -678,17 +654,6 @@ export default function App() {
             <div className="hero-content w-full flex-col items-center text-center gap-2">
               <h1 className="text-3xl font-extrabold">Hi Bee 👋</h1>
               <p className="text-base-content/70">Practice a little each day. Small steps, big progress.</p>
-              <select
-                className="select select-bordered w-full sm:max-w-xs mb-2"
-                value={category}
-                onChange={handleCategoryChange}
-              >
-                {CATEGORIES.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.label}
-                  </option>
-                ))}
-              </select>
               <div className="flex gap-2">
                 {currentLesson ? (
                   <button className="btn btn-primary" onClick={() => setView("practice")}>Continue practice</button>
