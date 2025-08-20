@@ -15,6 +15,25 @@ function hitLimit(id, max = 200) {
   return true;
 }
 
+function normalizeLesson(lesson) {
+  if (!lesson || typeof lesson !== "object") return [];
+  const acc = [];
+  if (lesson.title) acc.push(String(lesson.title));
+  if (Array.isArray(lesson.items)) {
+    for (const it of lesson.items) {
+      if (!it) continue;
+      if (it.type === "text" && it.content) acc.push(String(it.content));
+      if ((it.type === "word" || it.type === "phrase" || it.type === "sentence") && it.term)
+        acc.push(String(it.term));
+    }
+  }
+  if (lesson.meta) {
+    if (lesson.meta.level) acc.push(String(lesson.meta.level));
+    if (lesson.meta.topic) acc.push(String(lesson.meta.topic));
+  }
+  return acc.map((s) => s.toLowerCase().trim().replace(/\s+/g, " ")).sort();
+}
+
 function fingerprint(str) {
   let h = 0x811c9dc5;
   for (let i = 0; i < str.length; i++) {
@@ -24,78 +43,40 @@ function fingerprint(str) {
   return (h >>> 0).toString(16).padStart(8, "0");
 }
 
-function normalizeSentence(s = "") {
-  return s.toLowerCase().replace(/[^a-z?' ]+/g, "").replace(/\s+/g, " ").trim();
-}
-
-function tokenize(s) {
-  return normalizeSentence(s).split(" ").filter(Boolean);
-}
-
 function lessonFingerprint(lesson) {
-  const arr = lesson.items.map((i) => normalizeSentence(i.en));
-  arr.sort();
-  return fingerprint(JSON.stringify(arr));
+  return fingerprint(JSON.stringify(normalizeLesson(lesson)));
 }
 
-function jaccard(a, b) {
-  const sa = new Set(a);
-  const sb = new Set(b);
-  let inter = 0;
-  for (const x of sa) if (sb.has(x)) inter++;
-  const union = sa.size + sb.size - inter;
-  return union === 0 ? 0 : inter / union;
-}
-
-function ngramOverlap(a, b) {
-  const n = 3;
-  const ng = (arr) => {
-    const out = new Set();
-    for (let i = 0; i <= arr.length - n; i++) out.add(arr.slice(i, i + n).join(" "));
-    return out;
-  };
-  const sa = ng(a);
-  const sb = ng(b);
-  let inter = 0;
-  for (const x of sa) if (sb.has(x)) inter++;
-  const minSz = Math.min(sa.size, sb.size) || 1;
-  return inter / minSz;
-}
-
-function classify(en) {
-  const norm = normalizeSentence(en);
-  if (/\b(?:not|dont|doesnt|cant|wont|isnt|arent)\b/.test(norm)) return "negation";
-  if (norm.startsWith("please ")) return "request";
-  if (en.trim().endsWith("?")) return "question";
-  return "statement";
-}
-
-const userHistory = new Map(); // uid -> {phrases: [], tokens: Map}
-
-function getUser(uid) {
-  if (!userHistory.has(uid)) {
-    userHistory.set(uid, { phrases: [], tokens: new Map() });
+function parseItems(arr) {
+  const out = [];
+  if (!Array.isArray(arr)) return out;
+  for (const it of arr) {
+    if (!it) continue;
+    if (typeof it === "string") {
+      const term = it.trim();
+      if (term) out.push({ type: "sentence", term });
+      continue;
+    }
+    if (typeof it !== "object") continue;
+    if (
+      (it.type === "word" || it.type === "phrase" || it.type === "sentence") &&
+      typeof it.term === "string" &&
+      it.term.trim()
+    ) {
+      const obj = { type: it.type, term: it.term.trim() };
+      if (typeof it.thai === "string" && it.thai.trim()) obj.thai = it.thai.trim();
+      out.push(obj);
+    } else if (it.type === "text" && typeof it.content === "string" && it.content.trim()) {
+      const obj = { type: "text", content: it.content.trim() };
+      if (typeof it.thai === "string" && it.thai.trim()) obj.thai = it.thai.trim();
+      out.push(obj);
+    } else if (typeof it.term === "string" && it.term.trim()) {
+      const obj = { type: "sentence", term: it.term.trim() };
+      if (typeof it.thai === "string" && it.thai.trim()) obj.thai = it.thai.trim();
+      out.push(obj);
+    }
   }
-  return userHistory.get(uid);
-}
-
-function recordHistory(uid, sentences) {
-  const h = getUser(uid);
-  for (const s of sentences) {
-    const norm = normalizeSentence(s);
-    const fp = fingerprint(norm);
-    h.phrases.push(fp);
-    if (h.phrases.length > 500) h.phrases.shift();
-    const toks = tokenize(norm);
-    for (const t of toks) h.tokens.set(t, (h.tokens.get(t) || 0) + 1);
-  }
-}
-
-function topTokens(uid, limit = 50) {
-  const h = getUser(uid);
-  const entries = Array.from(h.tokens.entries());
-  entries.sort((a, b) => b[1] - a[1]);
-  return entries.slice(0, limit).map((e) => e[0]);
+  return out;
 }
 
 export default async function handler(req, res) {
@@ -103,7 +84,7 @@ export default async function handler(req, res) {
   if (!process.env.OPENAI_API_KEY) {
     return res.status(500).json({ error: "Server misconfigured" });
   }
-  const uid = req.headers["x-firebase-uid"] || req.headers["x-uid"] || "anon";
+  const uid = req.headers["x-firebase-uid"] || req.headers["x-uid"];
   const ip =
     req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.socket?.remoteAddress || "";
   const key = uid ? `uid:${uid}` : `ip:${ip}`;
@@ -111,9 +92,9 @@ export default async function handler(req, res) {
     return res.status(429).json({ error: "Daily limit exceeded (200/day)" });
   }
   try {
-    const { category = "routines" } = req.body ?? {};
+    const { level = "beginner", topic = "daily life" } = req.body ?? {};
 
-    async function callOpenAI(cnt, avoid = [], avoidTokens = []) {
+    async function callOpenAI(cnt, avoid = []) {
       const ctl = new AbortController();
       const t = setTimeout(() => ctl.abort(new Error("timeout")), 25_000);
       const r = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -128,11 +109,11 @@ export default async function handler(req, res) {
             {
               role: "system",
               content:
-                "You generate short A1/A2 English practice sentences for Thai learners. Respond with JSON {items:[{type:'s', en, th}]}. Each English sentence is 8-14 words with a polite Thai translation. Include about 4 statements, 3 questions, 2 polite requests, and 1 negation.",
+                "You generate compact ESL lessons for Thai learners. Respond with JSON only in the shape {title, items:[{type:'sentence', term, thai}]}. Each item is a unique English sentence or short conversational phrase of 5-10 words with a simple Thai translation in the 'thai' field. Mix statements, questions, and short phrases.",
             },
             {
               role: "user",
-              content: `Category: ${category}. Count: ${cnt}. Avoid sentences: ${avoid.join(" | ")}. Discourage tokens: ${avoidTokens.join(", ")}.`,
+              content: `Level: ${level}, Count: ${cnt}, Topic: ${topic}. Avoid sentences: ${avoid.join(" | ")}.`,
             },
           ],
           temperature: 0.7,
@@ -155,114 +136,64 @@ export default async function handler(req, res) {
         console.error("openai invalid json", raw.slice(0, 200));
         throw new Error("invalid json");
       }
-      return { items: Array.isArray(parsed.items) ? parsed.items : [] };
+      return {
+        title: typeof parsed.title === "string" && parsed.title.trim() ? parsed.title.trim() : "",
+        items: parseItems(parsed.items),
+      };
     }
 
     const desired = 10;
-    const user = getUser(uid);
-    const avoidSet = new Set(user.phrases);
-    let attempts = 0;
-    const selected = [];
-    const firstWords = new Set();
-    const counts = { statement: 0, question: 0, request: 0, negation: 0 };
-    while (selected.length < desired && attempts < 3) {
-      const needed = desired - selected.length;
-      const resp = await callOpenAI(Math.min(18, needed * 2 + 8), Array.from(avoidSet), topTokens(uid));
-      const candidates = resp.items
-        .map((it) => ({
-          en: (it.en || it.term || "").trim(),
-          th: (it.th || it.thai || "").trim(),
-        }))
-        .filter((it) => it.en);
-
-      for (const c of candidates) {
-        if (selected.length >= desired) break;
-        const norm = normalizeSentence(c.en);
-        const fp = fingerprint(norm);
-        if (avoidSet.has(fp)) continue;
-        const words = tokenize(norm);
-        if (words.length < 8 || words.length > 14) continue;
-        let dup = false;
-        for (const s of selected) {
-          if (jaccard(words, s.tokens) >= 0.8 || ngramOverlap(words, s.tokens) >= 0.6) {
-            dup = true;
-            break;
-          }
-        }
-        if (dup) continue;
-        const first = words[0];
-        if (firstWords.has(first)) continue;
-        const kind = classify(c.en);
-        if (
-          (kind === "statement" && counts.statement >= 4) ||
-          (kind === "question" && counts.question >= 3) ||
-          (kind === "request" && counts.request >= 2) ||
-          (kind === "negation" && counts.negation >= 1)
-        ) {
-          continue;
-        }
-        selected.push({ en: c.en, th: c.th, fp, tokens: words });
-        firstWords.add(first);
-        counts[kind]++;
-        avoidSet.add(fp);
-      }
-      attempts++;
-    }
-
-    if (selected.length < desired) {
-      attempts = 0;
-      while (selected.length < desired && attempts < 2) {
-        const need = desired - selected.length;
-        const resp = await callOpenAI(need + 4, Array.from(avoidSet), topTokens(uid));
-        const candidates = resp.items
-          .map((it) => ({ en: (it.en || it.term || "").trim(), th: (it.th || it.thai || "").trim() }))
-          .filter((it) => it.en);
-        for (const c of candidates) {
-          if (selected.length >= desired) break;
-          const norm = normalizeSentence(c.en);
-          const fp = fingerprint(norm);
-          if (avoidSet.has(fp)) continue;
-          const words = tokenize(norm);
-          if (words.length < 8 || words.length > 14) continue;
-          let dup = false;
-          for (const s of selected) {
-            if (jaccard(words, s.tokens) >= 0.8 || ngramOverlap(words, s.tokens) >= 0.6) {
-              dup = true;
-              break;
-            }
-          }
-          if (dup) continue;
-          selected.push({ en: c.en, th: c.th, fp, tokens: words });
-          avoidSet.add(fp);
-        }
-        attempts++;
+    let title = "";
+    const items = [];
+    const seen = new Set();
+    for (let attempt = 0; attempt < 5 && items.length < desired; attempt++) {
+      const need = (desired - items.length) * 2;
+      const avoid = Array.from(seen);
+      const resp = await callOpenAI(need, avoid);
+      if (!title && resp.title) title = resp.title;
+      for (const it of resp.items) {
+        const term = typeof it.term === "string" ? it.term.trim() : "";
+        if (!term) continue;
+        const norm = term.toLowerCase();
+        const words = norm.split(/\s+/);
+        if (words.length < 5 || words.length > 10) continue;
+        if (seen.has(norm)) continue;
+        seen.add(norm);
+        items.push({ type: "sentence", term, thai: it.thai || "" });
+        if (items.length >= desired) break;
       }
     }
-
-    if (selected.length === 0) {
-      return res.status(500).json({ error: "No sentences generated" });
+    if (items.length < desired) {
+      const fallback = [
+        { type: "sentence", term: "I like to walk in the park.", thai: "" },
+        { type: "sentence", term: "What time is it right now?", thai: "" },
+        { type: "sentence", term: "She drinks coffee every morning.", thai: "" },
+        { type: "sentence", term: "Can you help me with this?", thai: "" },
+        { type: "sentence", term: "We are going to the beach.", thai: "" },
+        { type: "sentence", term: "He reads a book every night.", thai: "" },
+        { type: "sentence", term: "Please close the window, it's cold.", thai: "" },
+        { type: "sentence", term: "They will arrive in ten minutes.", thai: "" },
+        { type: "sentence", term: "Do you want to join us?", thai: "" },
+        { type: "sentence", term: "This restaurant serves delicious food.", thai: "" },
+      ];
+      for (const f of fallback) {
+        if (items.length >= desired) break;
+        const norm = f.term.toLowerCase();
+        if (seen.has(norm)) continue;
+        seen.add(norm);
+        items.push(f);
+      }
     }
-
-    const items = selected.slice(0, desired).map((s) => ({
-      type: "s",
-      en: s.en,
-      th: s.th,
-      fingerprint: s.fp,
-    }));
-
-    recordHistory(uid, items.map((i) => i.en));
 
     const lesson = {
-      title: `${category.charAt(0).toUpperCase() + category.slice(1)} — Sentences`,
-      items,
-      itemsCount: items.length,
-      meta: { category },
+      title: title || "Lesson",
+      items: items.slice(0, desired),
+      itemsCount: desired,
+      meta: { level, topic },
     };
-
     return res.status(200).json({ lesson: { ...lesson, fingerprint: lessonFingerprint(lesson) } });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ error: "Upstream error", status: 500 });
   }
 }
-
